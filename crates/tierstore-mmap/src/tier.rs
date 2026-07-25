@@ -94,6 +94,33 @@ impl MmapDiskTier {
         self.lock().total
     }
 
+    /// Drops every entry: files are unlinked and the accounting resets.
+    /// Outstanding [`Bytes`](bytes::Bytes) views stay valid — they hold their
+    /// (now unlinked) inodes mapped until dropped, the same contract as
+    /// overwrite and eviction. The coarse remediation for "some unknown set
+    /// of my entries is stale" (e.g. a missed-invalidation gap in a
+    /// cross-node feed).
+    ///
+    /// # Errors
+    /// Returns the first directory-scan error; individual unlink failures
+    /// are ignored (the file is already accounted gone, and a leftover is
+    /// re-indexed as a fresh entry on reopen).
+    pub fn clear(&self) -> io::Result<()> {
+        let mut inner = self.lock();
+        inner.maps.clear();
+        inner.sizes.clear();
+        inner.order.clear();
+        inner.total = 0;
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if entry.metadata()?.is_file() {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        drop(inner);
+        Ok(())
+    }
+
     fn path_for(&self, key: &str) -> PathBuf {
         self.root.join(hex_encode(key.as_bytes()))
     }
@@ -359,6 +386,26 @@ mod tests {
 
     fn key(s: &str) -> String {
         s.to_owned()
+    }
+
+    #[test]
+    fn clear_drops_everything_but_outstanding_views_survive() {
+        let root = temp_root("clear");
+        let _ = fs::remove_dir_all(&root);
+        let tier = MmapDiskTier::open(&root).expect("open");
+        block_on(tier.put(key("a"), b"alpha".to_vec().into())).expect("put");
+        block_on(tier.put(key("b"), b"beta".to_vec().into())).expect("put");
+        let view = block_on(tier.get(&key("a"))).expect("get").expect("hit");
+
+        tier.clear().expect("clear");
+        assert!(block_on(tier.get(&key("a"))).expect("get").is_none());
+        assert!(block_on(tier.get(&key("b"))).expect("get").is_none());
+        assert_eq!(&view[..], b"alpha", "outstanding views keep their inode");
+
+        // A reopen over the cleared directory indexes nothing.
+        let fresh = MmapDiskTier::open(&root).expect("reopen");
+        assert!(block_on(fresh.get(&key("a"))).expect("get").is_none());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
