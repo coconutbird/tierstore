@@ -9,7 +9,7 @@ use groupnet::core::NodeId;
 use groupnet::runtime::{Group, Node};
 use groupnet::transport::mem::{MemTransport, Network};
 use tierstore::{MemoryTier, TierRead, TieredCache};
-use tierstore_groupnet::{PeerWrite, PeerWrites, WriteFeed};
+use tierstore_groupnet::{Frontier, PeerWrite, PeerWrites, WriteFeed};
 
 const GROUP: &str = "cache";
 
@@ -64,16 +64,17 @@ async fn peer_writes_arrive_as_invalidations_and_apply_to_a_cache() {
         String::from_utf8(bytes.to_vec()).ok()
     });
 
-    // Node A publishes two writes.
+    // Node A publishes two writes; seqs are the read-your-writes tokens.
     let feed = WriteFeed::new(a_group, cap(128), |key: &String| key.clone().into_bytes());
-    feed.publish(&"user:1".to_owned()).await;
-    feed.publish(&"user:2".to_owned()).await;
+    assert_eq!(feed.publish(&"user:1".to_owned()).await, 1);
+    assert_eq!(feed.publish(&"user:2".to_owned()).await, 2);
 
     // B observes them in order and applies the invalidation.
-    for expected in ["user:1", "user:2"] {
+    for (expected_seq, expected) in [(1, "user:1"), (2, "user:2")] {
         match next_event(&mut peers).await {
-            PeerWrite::Invalidate { peer, key } => {
+            PeerWrite::Invalidate { peer, seq, key } => {
                 assert_eq!(peer, a_id);
+                assert_eq!(seq, expected_seq);
                 assert_eq!(key, expected);
                 let _ = cache.invalidate(&key).await;
             }
@@ -116,13 +117,17 @@ async fn ring_overflow_degrades_to_an_explicit_resync() {
     // B must learn it missed something — loudly — then catch the survivors.
     assert_eq!(
         next_event(&mut peers).await,
-        PeerWrite::Resync { peer: a_id.clone() },
+        PeerWrite::Resync {
+            peer: a_id.clone(),
+            applied_through: 2
+        },
         "an overflowed ring must surface as a resync, never a silent skip"
     );
     assert_eq!(
         next_event(&mut peers).await,
         PeerWrite::Invalidate {
             peer: a_id.clone(),
+            seq: 3,
             key: "w3".to_owned()
         }
     );
@@ -130,6 +135,7 @@ async fn ring_overflow_degrades_to_an_explicit_resync() {
         next_event(&mut peers).await,
         PeerWrite::Invalidate {
             peer: a_id,
+            seq: 4,
             key: "w4".to_owned()
         }
     );
@@ -154,4 +160,60 @@ async fn own_writes_are_ignored() {
     // Nothing may arrive: a node does not invalidate itself.
     let quiet = tokio::time::timeout(Duration::from_millis(300), own.next()).await;
     assert!(quiet.is_err(), "own writes must not produce events");
+}
+
+#[tokio::test]
+async fn read_your_writes_barrier_waits_for_the_applied_frontier() {
+    let net = Network::new();
+    let (a_id, _a_node, a_group) = spawn_node(&net, "ryw-a", &["ryw-b"]);
+    let (b_id, _b_node, b_group) = spawn_node(&net, "ryw-b", &["ryw-a"]);
+    converged(&[&a_group, &b_group]).await;
+
+    // Node B: a cache holding a stale copy, an apply loop, and a frontier.
+    let hot = std::sync::Arc::new(MemoryTier::unbounded());
+    let cache: std::sync::Arc<TieredCache<String, Vec<u8>>> = std::sync::Arc::new(
+        TieredCache::builder()
+            .tier(std::sync::Arc::clone(&hot))
+            .build(),
+    );
+    let _ = cache.put("user:1".to_owned(), b"stale".to_vec()).await;
+
+    let mut peers = PeerWrites::new(b_group, b_id, |bytes| {
+        String::from_utf8(bytes.to_vec()).ok()
+    });
+    let (frontier, view) = Frontier::new();
+    let apply_cache = std::sync::Arc::clone(&cache);
+    tokio::spawn(async move {
+        while let Some(event) = peers.next().await {
+            match event {
+                PeerWrite::Invalidate { peer, seq, key } => {
+                    let _ = apply_cache.invalidate(&key).await;
+                    frontier.advance(&peer, seq);
+                }
+                PeerWrite::Resync {
+                    peer,
+                    applied_through,
+                } => frontier.advance(&peer, applied_through),
+            }
+        }
+    });
+
+    // Node A writes; the returned seq is the client's token.
+    let feed = WriteFeed::new(a_group, cap(64), |key: &String| key.clone().into_bytes());
+    let token = feed.publish(&"user:1".to_owned()).await;
+
+    // A client carrying (a, token) reads on B: the barrier resolves only
+    // after the apply loop has actually invalidated — never a stale read.
+    let reached = tokio::time::timeout(Duration::from_secs(5), view.reached(&a_id, token))
+        .await
+        .expect("barrier timed out");
+    assert!(
+        reached,
+        "frontier must be reachable while the apply loop runs"
+    );
+    assert_eq!(
+        hot.get(&"user:1".to_owned()).await.expect("hot peek"),
+        None,
+        "after the barrier, the stale copy is provably gone"
+    );
 }

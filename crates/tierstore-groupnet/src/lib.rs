@@ -28,6 +28,22 @@
 //!   invalidate). Feeds appearing later replay their visible window — those
 //!   writes are genuinely new.
 //!
+//! # Building consistency on top
+//!
+//! Each node's feed is totally ordered by sequence number, and that is
+//! enough for **per-writer session consistency**: [`WriteFeed::publish`]
+//! resolves to the write's sequence number; hand `(writer, seq)` to the
+//! client as a token, and any node serving that client barriers with
+//! [`FrontierView::reached`] before reading locally. The [`Frontier`] is
+//! advanced by *your* apply loop after each invalidation lands, so
+//! "reached" means applied, not merely delivered — a true read-your-writes
+//! barrier.
+//!
+//! What this deliberately does not give you is linearizable multi-writer
+//! ordering: that requires consensus, which groupnet excludes by design
+//! (its coordinator is derived, not fenced). Pair with a consensus log
+//! (e.g. openraft) if you need a total order across writers.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -51,18 +67,31 @@
 //! let mut peers = PeerWrites::new(group, me, |bytes| {
 //!     String::from_utf8(bytes.to_vec()).ok()
 //! });
+//! let (frontier, view) = tierstore_groupnet::Frontier::new();
 //!
-//! // After every local durable write:
-//! feed.publish(&"user:1".to_owned()).await;
+//! // After every local durable write (the seq is the client's RYW token):
+//! let seq = feed.publish(&"user:1".to_owned()).await;
 //!
-//! // Apply peer writes as they arrive:
-//! while let Some(event) = peers.next().await {
-//!     match event {
-//!         PeerWrite::Invalidate { key, .. } => {
-//!             let _ = cache.invalidate(&key).await;
+//! // Apply peer writes, advancing the frontier only once applied:
+//! tokio::spawn(async move {
+//!     while let Some(event) = peers.next().await {
+//!         match event {
+//!             PeerWrite::Invalidate { peer, seq, key } => {
+//!                 let _ = cache.invalidate(&key).await;
+//!                 frontier.advance(&peer, seq);
+//!             }
+//!             PeerWrite::Resync { peer, applied_through } => {
+//!                 // flush or rebuild local tiers, then:
+//!                 frontier.advance(&peer, applied_through);
+//!             }
 //!         }
-//!         PeerWrite::Resync { .. } => { /* flush or rebuild local tiers */ }
 //!     }
+//! });
+//!
+//! // Serving a client that carries a token (writer, seq): barrier first.
+//! # let (writer, token_seq) = (NodeId::new("node-b"), 1);
+//! if view.reached(&writer, token_seq).await {
+//!     // local tiers now reflect that write — read locally
 //! }
 //! # }
 //! ```
@@ -94,15 +123,21 @@ pub enum PeerWrite<K> {
     Invalidate {
         /// The node that performed the write.
         peer: NodeId,
+        /// The write's sequence number in `peer`'s feed — advance the
+        /// [`Frontier`] with it once the invalidation is applied.
+        seq: u64,
         /// The written key.
         key: K,
     },
     /// `peer`'s feed advanced past this subscriber's cursor: some writes
     /// were provably missed. The application should flush or rebuild its
-    /// local tiers for safety.
+    /// local tiers, then advance the [`Frontier`] to `applied_through`.
     Resync {
         /// The node whose writes were missed.
         peer: NodeId,
+        /// After flushing, every write of `peer` up to and including this
+        /// sequence number is covered.
+        applied_through: u64,
     },
 }
 
@@ -219,21 +254,27 @@ impl<K> WriteFeed<K> {
         }
     }
 
-    /// Records `key` as written and advertises the updated feed.
+    /// Records `key` as written and advertises the updated feed, resolving
+    /// to the write's sequence number in this node's feed — the second half
+    /// of a `(writer, seq)` read-your-writes token.
     ///
     /// The write is recorded in the ring synchronously (before the returned
     /// future is polled), so even a dropped future is re-carried by the
     /// next publish.
-    pub fn publish(&self, key: &K) -> impl Future<Output = ()> + Send + '_ {
-        let frame = {
+    pub fn publish(&self, key: &K) -> impl Future<Output = u64> + Send + '_ {
+        let (seq, frame) = {
             let mut ring = self
                 .ring
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let seq = ring.first_seq + ring.keys.len() as u64;
             ring.push((self.encode)(key));
-            ring.frame().encode()
+            (seq, ring.frame().encode())
         };
-        self.advertise(frame)
+        async move {
+            self.advertise(frame).await;
+            seq
+        }
     }
 
     /// Re-advertises the current feed without recording a new write —
@@ -357,8 +398,10 @@ impl<K> PeerWrites<K> {
         let cursor = self.cursors.entry(node.clone()).or_insert(frame.first_seq);
         if *cursor < frame.first_seq {
             // The ring advanced past us: writes were provably missed.
-            self.pending
-                .push_back(PeerWrite::Resync { peer: node.clone() });
+            self.pending.push_back(PeerWrite::Resync {
+                peer: node.clone(),
+                applied_through: frame.first_seq.saturating_sub(1),
+            });
             *cursor = frame.first_seq;
         }
         while *cursor < frame.end() {
@@ -368,11 +411,68 @@ impl<K> PeerWrites<K> {
             if let Some(key) = (self.decode)(&frame.keys[index]) {
                 self.pending.push_back(PeerWrite::Invalidate {
                     peer: node.clone(),
+                    seq: *cursor,
                     key,
                 });
             }
             *cursor += 1;
         }
+    }
+}
+
+/// Applied-write watermarks per peer, advanced by the application's apply
+/// loop — see [`Frontier`].
+type Applied = HashMap<NodeId, u64>;
+
+/// The writer half of the applied-write frontier.
+///
+/// The apply loop calls [`Frontier::advance`] after each peer write has
+/// actually been applied (invalidation done, or resync flush finished).
+/// Barriers on the matching [`FrontierView`] then mean *applied*, not
+/// merely delivered.
+#[derive(Debug)]
+pub struct Frontier {
+    tx: tokio::sync::watch::Sender<Applied>,
+}
+
+/// The reader half: cheap to clone, held wherever reads need a
+/// read-your-writes barrier.
+#[derive(Debug, Clone)]
+pub struct FrontierView {
+    rx: tokio::sync::watch::Receiver<Applied>,
+}
+
+impl Frontier {
+    /// A fresh frontier (nothing applied) and its reader view.
+    #[must_use]
+    pub fn new() -> (Self, FrontierView) {
+        let (tx, rx) = tokio::sync::watch::channel(Applied::new());
+        (Self { tx }, FrontierView { rx })
+    }
+
+    /// Marks `peer`'s writes as applied through `seq` (monotonic: lower
+    /// values are ignored).
+    pub fn advance(&self, peer: &NodeId, seq: u64) {
+        self.tx.send_modify(|applied| {
+            let entry = applied.entry(peer.clone()).or_insert(0);
+            if *entry < seq {
+                *entry = seq;
+            }
+        });
+    }
+}
+
+impl FrontierView {
+    /// Waits until `peer`'s writes through `seq` have been applied locally.
+    ///
+    /// Returns `false` if the [`Frontier`] was dropped first (the apply
+    /// loop is gone — do not serve reads assuming freshness). Combine with
+    /// a caller-side timeout for bounded waiting.
+    pub async fn reached(&self, peer: &NodeId, seq: u64) -> bool {
+        let mut rx = self.rx.clone();
+        rx.wait_for(|applied| applied.get(peer).is_some_and(|&s| s >= seq))
+            .await
+            .is_ok()
     }
 }
 
