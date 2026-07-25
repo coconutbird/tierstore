@@ -10,7 +10,7 @@ use groupnet::core::NodeId;
 use groupnet::runtime::{Group, Node};
 use groupnet::transport::mem::{MemTransport, Network};
 use tierstore::{MemoryTier, TierRead, TieredCache};
-use tierstore_groupnet::{Frontier, PeerWrite, PeerWrites, WriteFeed};
+use tierstore_groupnet::{Frontier, PeerWrite, PeerWrites, WriteFeed, WriteToken};
 
 const GROUP: &str = "cache";
 
@@ -65,17 +65,30 @@ async fn peer_writes_arrive_as_invalidations_and_apply_to_a_cache() {
         String::from_utf8(bytes.to_vec()).ok()
     });
 
-    // Node A publishes two writes; seqs are the read-your-writes tokens.
+    // Node A publishes two writes; the tokens are the RYW session tokens.
     let feed = WriteFeed::new(a_group, cap(128), |key: &String| key.clone().into_bytes());
-    assert_eq!(feed.publish(&"user:1".to_owned()).await, 1);
-    assert_eq!(feed.publish(&"user:2".to_owned()).await, 2);
+    let epoch = feed.epoch();
+    assert_eq!(
+        feed.publish(&"user:1".to_owned()).await,
+        WriteToken { epoch, seq: 1 }
+    );
+    assert_eq!(
+        feed.publish(&"user:2".to_owned()).await,
+        WriteToken { epoch, seq: 2 }
+    );
 
     // B observes them in order and applies the invalidation.
     for (expected_seq, expected) in [(1, "user:1"), (2, "user:2")] {
         match next_event(&mut peers).await {
-            PeerWrite::Wrote { peer, seq, key } => {
+            PeerWrite::Wrote { peer, token, key } => {
                 assert_eq!(peer, a_id);
-                assert_eq!(seq, expected_seq);
+                assert_eq!(
+                    token,
+                    WriteToken {
+                        epoch,
+                        seq: expected_seq
+                    }
+                );
                 assert_eq!(key, expected);
                 let _ = cache.invalidate(&key).await;
             }
@@ -101,6 +114,7 @@ async fn ring_overflow_degrades_to_an_explicit_gap() {
     });
     // A tiny ring: two slots.
     let feed = WriteFeed::new(a_group, cap(2), |key: &String| key.clone().into_bytes());
+    let epoch = feed.epoch();
 
     // B tracks the feed normally first (cursor lands at w1's end)…
     feed.publish(&"w1".to_owned()).await;
@@ -120,7 +134,7 @@ async fn ring_overflow_degrades_to_an_explicit_gap() {
         next_event(&mut peers).await,
         PeerWrite::Gap {
             peer: a_id.clone(),
-            missed_through: 2
+            missed_through: WriteToken { epoch, seq: 2 }
         },
         "an overflowed ring must surface as a gap, never a silent skip"
     );
@@ -128,7 +142,7 @@ async fn ring_overflow_degrades_to_an_explicit_gap() {
         next_event(&mut peers).await,
         PeerWrite::Wrote {
             peer: a_id.clone(),
-            seq: 3,
+            token: WriteToken { epoch, seq: 3 },
             key: "w3".to_owned()
         }
     );
@@ -136,7 +150,7 @@ async fn ring_overflow_degrades_to_an_explicit_gap() {
         next_event(&mut peers).await,
         PeerWrite::Wrote {
             peer: a_id,
-            seq: 4,
+            token: WriteToken { epoch, seq: 4 },
             key: "w4".to_owned()
         }
     );
@@ -187,9 +201,9 @@ async fn read_your_writes_barrier_waits_for_the_applied_frontier() {
     tokio::spawn(async move {
         while let Some(event) = peers.next().await {
             match event {
-                PeerWrite::Wrote { peer, seq, key } => {
+                PeerWrite::Wrote { peer, token, key } => {
                     let _ = apply_cache.invalidate(&key).await;
-                    frontier.advance(&peer, seq);
+                    frontier.advance(&peer, token);
                 }
                 PeerWrite::Gap {
                     peer,
@@ -199,7 +213,7 @@ async fn read_your_writes_barrier_waits_for_the_applied_frontier() {
         }
     });
 
-    // Node A writes; the returned seq is the client's token.
+    // Node A writes; the returned token is the client's session token.
     let feed = WriteFeed::new(a_group, cap(64), |key: &String| key.clone().into_bytes());
     let token = feed.publish(&"user:1".to_owned()).await;
 

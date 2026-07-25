@@ -5,7 +5,8 @@
 //! The pattern for a tiered cache:
 //!
 //! - After every local durable write, [`WriteFeed::publish`] — the resolved
-//!   sequence number is the client's `(writer, seq)` read-your-writes token.
+//!   [`WriteToken`] is the client's `(writer, token)` read-your-writes
+//!   session token.
 //! - An apply loop turns [`PeerWrite::Wrote`] into `cache.invalidate(&key)`
 //!   and [`PeerWrite::Gap`] into a coarse flush of the local tiers,
 //!   advancing the [`Frontier`] only after each has actually been applied.
@@ -13,10 +14,11 @@
 //!   [`FrontierView::reached`] before reading locally — "reached" means
 //!   applied, so the read is provably not stale for that writer.
 //!
-//! The semantics — state-based feeds, loss detected as explicit gaps (never
-//! a silent skip), per-writer session consistency, consensus deliberately
-//! out of scope — are documented once, in [`groupnet_consistency`]. Read
-//! them there; rely on them here.
+//! The semantics — state-based feeds, loss *and writer restarts* detected
+//! as explicit gaps (never a silent skip), epoch-major tokens, per-writer
+//! session consistency, consensus deliberately out of scope — are
+//! documented once, in [`groupnet_consistency`]. Read them there; rely on
+//! them here.
 //!
 //! # Example
 //!
@@ -43,16 +45,16 @@
 //! });
 //! let (frontier, view) = Frontier::new();
 //!
-//! // After every local durable write (the seq is the client's RYW token):
-//! let seq = feed.publish(&"user:1".to_owned()).await;
+//! // After every local durable write (the token is the client's RYW token):
+//! let token = feed.publish(&"user:1".to_owned()).await;
 //!
 //! // Apply peer writes, advancing the frontier only once applied:
 //! tokio::spawn(async move {
 //!     while let Some(event) = peers.next().await {
 //!         match event {
-//!             PeerWrite::Wrote { peer, seq, key } => {
+//!             PeerWrite::Wrote { peer, token, key } => {
 //!                 let _ = cache.invalidate(&key).await;
-//!                 frontier.advance(&peer, seq);
+//!                 frontier.advance(&peer, token);
 //!             }
 //!             PeerWrite::Gap {
 //!                 peer,
@@ -65,12 +67,14 @@
 //!     }
 //! });
 //!
-//! // Serving a client that carries a token (writer, seq): barrier first.
-//! # let (writer, token_seq) = (NodeId::new("node-b"), 1);
-//! if view.reached(&writer, token_seq).await {
+//! // Serving a client that carries a token (writer, token): barrier first.
+//! # let writer = NodeId::new("node-b");
+//! if view.reached(&writer, token).await {
 //!     // local tiers now reflect that write — read locally
 //! }
 //! # }
 //! ```
 
-pub use groupnet_consistency::{Frontier, FrontierView, PeerWrite, PeerWrites, WriteFeed};
+pub use groupnet_consistency::{
+    Frontier, FrontierView, PeerWrite, PeerWrites, WriteFeed, WriteToken,
+};
