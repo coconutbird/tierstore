@@ -26,11 +26,13 @@ tierstore-moka   Adapter: MokaTier, a sharded TinyLFU hot tier for
                  high-throughput inclusive hierarchies (moka evicts
                  internally, so it reports no displacement — use MemoryTier
                  for exclusive rollover stacks).
-tierstore-groupnet  Adapter: cross-node write sync over the groupnet gossip
-                 fabric — WriteFeed publishes local writes, PeerWrites turns
-                 peer feeds into Invalidate/Resync events. State-based and
-                 loss-tolerant; missed writes degrade to an explicit Resync,
-                 never a silent skip.
+tierstore-groupnet  Adapter: cross-node write sync for tiered caches. The
+                 machinery lives in groupnet's `groupnet-consistency` crate
+                 (per-writer sequenced write feeds, Wrote/Gap events, and
+                 Frontier read-your-writes barriers — reusable by any
+                 groupnet system); this crate is its cache-flavored face:
+                 docs, re-exports, and the cache integration tests. Missed
+                 writes degrade to an explicit Gap, never a silent skip.
                  Together these are the template for backend adapters
                  (redis, s3, postgres, …).
 ```

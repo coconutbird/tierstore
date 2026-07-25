@@ -9,11 +9,14 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+# The machinery lives in groupnet-consistency (so any groupnet system can
+# borrow it); this crate is the cache-flavored face: docs, re-exports, and
+# the tiered-cache integration tests.
 [dependencies]
-groupnet.workspace = true
-tokio.workspace = true
+groupnet-consistency.workspace = true
 
 [dev-dependencies]
+groupnet.workspace = true
 tierstore.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 

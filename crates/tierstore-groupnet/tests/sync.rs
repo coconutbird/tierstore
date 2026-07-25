@@ -1,6 +1,7 @@
-//! Two real groupnet nodes over the in-memory transport: writes published
-//! on one node arrive as invalidations on the other, ring overflow degrades
-//! to an explicit resync, and a node never reacts to its own writes.
+//! Two real groupnet nodes over the in-memory transport, applied to a real
+//! tiered cache: writes published on one node invalidate the other's stale
+//! copies, ring overflow degrades to an explicit gap, and a node never
+//! reacts to its own writes.
 
 use std::num::NonZeroUsize;
 use std::time::Duration;
@@ -72,13 +73,13 @@ async fn peer_writes_arrive_as_invalidations_and_apply_to_a_cache() {
     // B observes them in order and applies the invalidation.
     for (expected_seq, expected) in [(1, "user:1"), (2, "user:2")] {
         match next_event(&mut peers).await {
-            PeerWrite::Invalidate { peer, seq, key } => {
+            PeerWrite::Wrote { peer, seq, key } => {
                 assert_eq!(peer, a_id);
                 assert_eq!(seq, expected_seq);
                 assert_eq!(key, expected);
                 let _ = cache.invalidate(&key).await;
             }
-            PeerWrite::Resync { .. } => panic!("no resync expected"),
+            PeerWrite::Gap { .. } => panic!("no gap expected"),
         }
     }
     assert_eq!(
@@ -89,7 +90,7 @@ async fn peer_writes_arrive_as_invalidations_and_apply_to_a_cache() {
 }
 
 #[tokio::test]
-async fn ring_overflow_degrades_to_an_explicit_resync() {
+async fn ring_overflow_degrades_to_an_explicit_gap() {
     let net = Network::new();
     let (a_id, _a_node, a_group) = spawn_node(&net, "ov-a", &["ov-b"]);
     let (b_id, _b_node, b_group) = spawn_node(&net, "ov-b", &["ov-a"]);
@@ -104,8 +105,8 @@ async fn ring_overflow_degrades_to_an_explicit_resync() {
     // B tracks the feed normally first (cursor lands at w1's end)…
     feed.publish(&"w1".to_owned()).await;
     match next_event(&mut peers).await {
-        PeerWrite::Invalidate { key, .. } => assert_eq!(key, "w1"),
-        PeerWrite::Resync { .. } => panic!("no resync yet"),
+        PeerWrite::Wrote { key, .. } => assert_eq!(key, "w1"),
+        PeerWrite::Gap { .. } => panic!("no gap yet"),
     }
 
     // …then A writes three more without B draining: w2 falls off the ring.
@@ -117,15 +118,15 @@ async fn ring_overflow_degrades_to_an_explicit_resync() {
     // B must learn it missed something — loudly — then catch the survivors.
     assert_eq!(
         next_event(&mut peers).await,
-        PeerWrite::Resync {
+        PeerWrite::Gap {
             peer: a_id.clone(),
-            applied_through: 2
+            missed_through: 2
         },
-        "an overflowed ring must surface as a resync, never a silent skip"
+        "an overflowed ring must surface as a gap, never a silent skip"
     );
     assert_eq!(
         next_event(&mut peers).await,
-        PeerWrite::Invalidate {
+        PeerWrite::Wrote {
             peer: a_id.clone(),
             seq: 3,
             key: "w3".to_owned()
@@ -133,7 +134,7 @@ async fn ring_overflow_degrades_to_an_explicit_resync() {
     );
     assert_eq!(
         next_event(&mut peers).await,
-        PeerWrite::Invalidate {
+        PeerWrite::Wrote {
             peer: a_id,
             seq: 4,
             key: "w4".to_owned()
@@ -186,14 +187,14 @@ async fn read_your_writes_barrier_waits_for_the_applied_frontier() {
     tokio::spawn(async move {
         while let Some(event) = peers.next().await {
             match event {
-                PeerWrite::Invalidate { peer, seq, key } => {
+                PeerWrite::Wrote { peer, seq, key } => {
                     let _ = apply_cache.invalidate(&key).await;
                     frontier.advance(&peer, seq);
                 }
-                PeerWrite::Resync {
+                PeerWrite::Gap {
                     peer,
-                    applied_through,
-                } => frontier.advance(&peer, applied_through),
+                    missed_through,
+                } => frontier.advance(&peer, missed_through),
             }
         }
     });

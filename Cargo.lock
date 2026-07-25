@@ -147,7 +147,7 @@ dependencies = [
 [[package]]
 name = "groupnet"
 version = "0.1.0"
-source = "git+https://github.com/napbat/groupnet?branch=main#adf88aa1cc8c5e69b898a17356345b4be9953b4f"
+source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#4dbd56de2bd1bf1b8eb5e1d313337812d95b2e4a"
 dependencies = [
  "groupnet-core",
  "groupnet-runtime",
@@ -156,14 +156,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "groupnet-consistency"
+version = "0.1.0"
+source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#4dbd56de2bd1bf1b8eb5e1d313337812d95b2e4a"
+dependencies = [
+ "groupnet-core",
+ "groupnet-runtime",
+ "tokio",
+]
+
+[[package]]
 name = "groupnet-core"
 version = "0.1.0"
-source = "git+https://github.com/napbat/groupnet?branch=main#adf88aa1cc8c5e69b898a17356345b4be9953b4f"
+source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#4dbd56de2bd1bf1b8eb5e1d313337812d95b2e4a"
 
 [[package]]
 name = "groupnet-runtime"
 version = "0.1.0"
-source = "git+https://github.com/napbat/groupnet?branch=main#adf88aa1cc8c5e69b898a17356345b4be9953b4f"
+source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#4dbd56de2bd1bf1b8eb5e1d313337812d95b2e4a"
 dependencies = [
  "groupnet-core",
  "groupnet-transport",
@@ -173,7 +183,7 @@ dependencies = [
 [[package]]
 name = "groupnet-transport"
 version = "0.1.0"
-source = "git+https://github.com/napbat/groupnet?branch=main#adf88aa1cc8c5e69b898a17356345b4be9953b4f"
+source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#4dbd56de2bd1bf1b8eb5e1d313337812d95b2e4a"
 dependencies = [
  "groupnet-core",
 ]
@@ -181,7 +191,7 @@ dependencies = [
 [[package]]
 name = "groupnet-transport-mem"
 version = "0.1.0"
-source = "git+https://github.com/napbat/groupnet?branch=main#adf88aa1cc8c5e69b898a17356345b4be9953b4f"
+source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#4dbd56de2bd1bf1b8eb5e1d313337812d95b2e4a"
 dependencies = [
  "groupnet-core",
  "groupnet-transport",
@@ -388,6 +398,7 @@ name = "tierstore-groupnet"
 version = "0.1.0"
 dependencies = [
  "groupnet",
+ "groupnet-consistency",
  "tierstore",
  "tokio",
 ]
