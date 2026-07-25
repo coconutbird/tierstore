@@ -224,6 +224,12 @@ where
         self.router.remove_many(keys).await
     }
 
+    /// Per-tier operation counters (hits, misses, errors, puts, deletes).
+    #[must_use]
+    pub fn stats(&self) -> Vec<crate::TierStats> {
+        self.router.stats()
+    }
+
     /// The underlying router, for anything the store API does not expose.
     #[must_use]
     pub const fn router(&self) -> &Router<K, V> {

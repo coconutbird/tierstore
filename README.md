@@ -107,9 +107,10 @@ graduate into a real tier once we're happy with it.
 ## Memory story
 
 - **Bound the hot set:** `MemoryTier::bounded` (entry count) or
-  `MemoryTier::bounded_bytes(budget, weigher)` (byte budget). Overflow rolls
-  down; an entry heavier than the whole budget rolls straight through to
-  the next tier instead of thrashing the hot set.
+  `MemoryTier::bounded_bytes(budget, weigher)` (byte budget), with FIFO or
+  LRU ordering (`.with_eviction(Eviction::Lru)` — O(1) touches via stamped
+  tickets). Overflow rolls down; an entry heavier than the whole budget
+  rolls straight through to the next tier instead of thrashing the hot set.
 - **Bound transit:** values move between tiers as owned `V` clones, so pick
   a cheap-clone `V` for large values — `bytes::Bytes` turns every boundary
   clone into a refcount bump, and the router is already generic over it.
@@ -121,6 +122,11 @@ graduate into a real tier once we're happy with it.
   operations against it; transient fill memory becomes ~`limit × value
   size` instead of `callers × value size`. Single-flight already dedupes
   same-key fills; this bounds distinct-key fan-in.
+- **Keep blocking I/O off the executor:** wrap file-backed tiers in
+  `OffloadTier` — a dependency-free, executor-agnostic worker pool that
+  runs the inner tier's operations on its own threads.
+- **Watch it run:** `Router::stats()` (also on the cache and store) reports
+  per-tier hits, misses, errors, puts, and deletes.
 
 ## The docres shape (node-local layered storage)
 
@@ -151,8 +157,9 @@ let cache = TieredCache::builder()
   mapping slice on `MmapDiskTier`). Chunk-granular faulting à la shardstore
   is the same router with chunk keys (`(artifact, chunk_no)`) — promotion,
   rollover, and single-flight compose with it for free.
-- Deliberately not built in: async file offload (wrap file tiers at the
-  executor edge) and background refresh.
+- Wrap the file tiers in `OffloadTier` to keep their blocking I/O off the
+  async executor, and read hit ratios off `cache.stats()`. Background
+  refresh remains deliberately out of scope.
 
 ## Open questions (deliberately unresolved)
 
@@ -170,9 +177,8 @@ let cache = TieredCache::builder()
 7. Demotion churn when a lower tier is smaller than the one above it.
 8. Typed keys/values vs bytes: `DiskTier` is concrete (`String`/`Vec<u8>`);
    a codec adapter tier would bridge typed hierarchies onto byte stores.
-9. Eviction *order* in `MemoryTier` is FIFO (bounds are entry- and
-   byte-aware now); pluggable ordering (LRU, LFU) would live behind another
-   small trait.
+9. `MemoryTier` offers FIFO and LRU ordering; LFU, segmented/scan-resistant
+   policies, or a fully pluggable ordering trait are open.
 10. Static (generic tuple) tier composition to avoid boxing on the hot path.
 11. The batched *trait* methods stay lowest-common-denominator
     (`Result<Vec<…>, _>`), so a nested router driven through the tier traits
@@ -182,9 +188,9 @@ let cache = TieredCache::builder()
     (they hold the tier's lock). The refcounted-value path is shipped
     (`tierstore-mmap` + `V = Bytes` make boundary clones free); router-level
     borrowed views (boxed guards, top-tier fast path) remain open.
-13. Observability: per-tier hit/miss/error/eviction counters on the router
-    (shardstore's `ArtifactCache` keeps these) — a stats snapshot API is the
-    obvious shape.
+13. Richer observability: per-tier counters are in (`Router::stats`);
+    latency histograms, eviction counters inside tiers, and tracing hooks
+    are open.
 
 ## Prior art
 

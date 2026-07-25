@@ -11,6 +11,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tierstore_core::{
     Displaced, OnReadError, Policy, Probe, Promote, ReadFlow, ReadOutcome, ReadPolicy, ReadStep,
@@ -123,10 +124,51 @@ where
     }
 }
 
-/// One routed tier plus its write capability.
+/// One routed tier plus its write capability and counters.
 struct TierSlot<K, V> {
     tier: Box<dyn DynTier<K, V>>,
     writable: bool,
+    counters: Counters,
+}
+
+#[derive(Debug, Default)]
+struct Counters {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    errors: AtomicU64,
+    puts: AtomicU64,
+    deletes: AtomicU64,
+}
+
+impl Counters {
+    fn bump(counter: &AtomicU64, amount: u64) {
+        counter.fetch_add(amount, Ordering::Relaxed);
+    }
+}
+
+/// Point-in-time per-tier operation counters from [`Router::stats`].
+///
+/// Semantics: `hits`/`misses` count successful read probes (including
+/// existence checks), `puts` and `deletes` count successful write calls
+/// (batches count per entry/key), and `errors` counts failed calls of any
+/// kind (a failed batch counts once). Counters are `Relaxed` totals since
+/// construction — cheap, not a consistent cut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TierStats {
+    /// Diagnostic tier name.
+    pub name: String,
+    /// Whether the tier was added via `read_only_tier`.
+    pub read_only: bool,
+    /// Successful read probes that found the key.
+    pub hits: u64,
+    /// Successful read probes that confirmed absence.
+    pub misses: u64,
+    /// Failed operations of any kind.
+    pub errors: u64,
+    /// Entries successfully written (puts, promotions, demotions).
+    pub puts: u64,
+    /// Keys successfully deleted (including write-around invalidation).
+    pub deletes: u64,
 }
 
 /// Routes reads and writes across an ordered stack of tiers.
@@ -213,6 +255,24 @@ where
         self.tiers.len()
     }
 
+    /// Point-in-time snapshot of per-tier operation counters, in tier order
+    /// (0 is topmost). See [`TierStats`] for the counting semantics.
+    #[must_use]
+    pub fn stats(&self) -> Vec<TierStats> {
+        self.tiers
+            .iter()
+            .map(|slot| TierStats {
+                name: slot.tier.name().to_owned(),
+                read_only: !slot.writable,
+                hits: slot.counters.hits.load(Ordering::Relaxed),
+                misses: slot.counters.misses.load(Ordering::Relaxed),
+                errors: slot.counters.errors.load(Ordering::Relaxed),
+                puts: slot.counters.puts.load(Ordering::Relaxed),
+                deletes: slot.counters.deletes.load(Ordering::Relaxed),
+            })
+            .collect()
+    }
+
     /// Pushes entries displaced from tier `from` down the hierarchy,
     /// cascading further displacements. Returns whatever fell off the bottom
     /// (i.e. was evicted from the store entirely).
@@ -232,8 +292,12 @@ where
             }
             let mut next = Displaced::new();
             for (key, value) in current {
-                if let Ok(mut displaced) = self.tiers[target].tier.put(key, value).await {
-                    next.append(&mut displaced);
+                match self.tiers[target].tier.put(key, value).await {
+                    Ok(mut displaced) => {
+                        Counters::bump(&self.tiers[target].counters.puts, 1);
+                        next.append(&mut displaced);
+                    }
+                    Err(_) => Counters::bump(&self.tiers[target].counters.errors, 1),
                 }
             }
             current = next;
@@ -280,11 +344,14 @@ where
                 if !self.tiers[target].writable {
                     continue;
                 }
-                if let Ok(displaced) = self.tiers[target].tier.put_many(entries.clone()).await
-                    && self.policy.demote_displaced
-                    && !displaced.is_empty()
-                {
-                    let _evicted = self.demote(target, displaced).await;
+                match self.tiers[target].tier.put_many(entries.clone()).await {
+                    Ok(displaced) => {
+                        Counters::bump(&self.tiers[target].counters.puts, entries.len() as u64);
+                        if self.policy.demote_displaced && !displaced.is_empty() {
+                            let _evicted = self.demote(target, displaced).await;
+                        }
+                    }
+                    Err(_) => Counters::bump(&self.tiers[target].counters.errors, 1),
                 }
             }
         }
@@ -314,6 +381,9 @@ where
                 .collect();
             match slot.tier.get_many(&subset).await {
                 Ok(found) => {
+                    let found_count = found.iter().filter(|value| value.is_some()).count();
+                    Counters::bump(&slot.counters.hits, found_count as u64);
+                    Counters::bump(&slot.counters.misses, (subset.len() - found_count) as u64);
                     let mut still_missing = Vec::new();
                     for (&index, value) in unresolved.iter().zip(found) {
                         if let Some(value) = value {
@@ -327,14 +397,17 @@ where
                     }
                     unresolved = still_missing;
                 }
-                Err(source) => match self.policy.read.on_error {
-                    OnReadError::FailFast => {
-                        return Err(RouterError::Tier(self.failure(tier_index, source)));
+                Err(source) => {
+                    Counters::bump(&slot.counters.errors, 1);
+                    match self.policy.read.on_error {
+                        OnReadError::FailFast => {
+                            return Err(RouterError::Tier(self.failure(tier_index, source)));
+                        }
+                        OnReadError::FallThrough => {
+                            failures.push(self.failure(tier_index, source));
+                        }
                     }
-                    OnReadError::FallThrough => {
-                        failures.push(self.failure(tier_index, source));
-                    }
-                },
+                }
             }
         }
         if !failures.is_empty() {
@@ -362,11 +435,15 @@ where
             }
             match slot.tier.delete_many(keys).await {
                 Ok(flags) => {
+                    Counters::bump(&slot.counters.deletes, keys.len() as u64);
                     for (removed_flag, flag) in removed.iter_mut().zip(flags) {
                         *removed_flag |= flag;
                     }
                 }
-                Err(source) => failures.push(TierFailure::new(index, slot.tier.name(), source)),
+                Err(source) => {
+                    Counters::bump(&slot.counters.errors, 1);
+                    failures.push(TierFailure::new(index, slot.tier.name(), source));
+                }
             }
         }
         DeleteReport { removed, failures }
@@ -396,11 +473,16 @@ where
             match flow.step() {
                 ReadStep::Get { tier } => match self.tiers[tier].tier.get(key).await {
                     Ok(Some(value)) => {
+                        Counters::bump(&self.tiers[tier].counters.hits, 1);
                         hit = Some(value);
                         flow.on_get(Probe::Hit);
                     }
-                    Ok(None) => flow.on_get(Probe::Miss),
+                    Ok(None) => {
+                        Counters::bump(&self.tiers[tier].counters.misses, 1);
+                        flow.on_get(Probe::Miss);
+                    }
                     Err(source) => {
+                        Counters::bump(&self.tiers[tier].counters.errors, 1);
                         failures.push(self.failure(tier, source));
                         flow.on_get(Probe::Error);
                     }
@@ -412,12 +494,14 @@ where
                         // Best effort: a failed promotion must not fail the
                         // read. Entries the promotion displaces roll over
                         // into the next tier down.
-                        if let Ok(displaced) =
-                            self.tiers[tier].tier.put(key.clone(), value.clone()).await
-                            && self.policy.demote_displaced
-                            && !displaced.is_empty()
-                        {
-                            let _evicted = self.demote(tier, displaced).await;
+                        match self.tiers[tier].tier.put(key.clone(), value.clone()).await {
+                            Ok(displaced) => {
+                                Counters::bump(&self.tiers[tier].counters.puts, 1);
+                                if self.policy.demote_displaced && !displaced.is_empty() {
+                                    let _evicted = self.demote(tier, displaced).await;
+                                }
+                            }
+                            Err(_) => Counters::bump(&self.tiers[tier].counters.errors, 1),
                         }
                     }
                     flow.on_promote();
@@ -451,9 +535,16 @@ where
         loop {
             match flow.step() {
                 ReadStep::Get { tier } => match self.tiers[tier].tier.exists(key).await {
-                    Ok(true) => flow.on_get(Probe::Hit),
-                    Ok(false) => flow.on_get(Probe::Miss),
+                    Ok(true) => {
+                        Counters::bump(&self.tiers[tier].counters.hits, 1);
+                        flow.on_get(Probe::Hit);
+                    }
+                    Ok(false) => {
+                        Counters::bump(&self.tiers[tier].counters.misses, 1);
+                        flow.on_get(Probe::Miss);
+                    }
                     Err(source) => {
+                        Counters::bump(&self.tiers[tier].counters.errors, 1);
                         failures.push(self.failure(tier, source));
                         flow.on_get(Probe::Error);
                     }
@@ -515,6 +606,7 @@ where
                     }
                     match self.tiers[tier].tier.put(key.clone(), value.clone()).await {
                         Ok(displaced) => {
+                            Counters::bump(&self.tiers[tier].counters.puts, 1);
                             if displaced.is_empty() {
                                 continue;
                             }
@@ -525,6 +617,7 @@ where
                             }
                         }
                         Err(source) => {
+                            Counters::bump(&self.tiers[tier].counters.errors, 1);
                             return Err(RouterError::Tier(self.failure(tier, source)));
                         }
                     }
@@ -536,8 +629,14 @@ where
                     return Err(RouterError::ReadOnly);
                 };
                 let displaced = match self.tiers[bottom].tier.put(key.clone(), value).await {
-                    Ok(displaced) => displaced,
-                    Err(source) => return Err(RouterError::Tier(self.failure(bottom, source))),
+                    Ok(displaced) => {
+                        Counters::bump(&self.tiers[bottom].counters.puts, 1);
+                        displaced
+                    }
+                    Err(source) => {
+                        Counters::bump(&self.tiers[bottom].counters.errors, 1);
+                        return Err(RouterError::Tier(self.failure(bottom, source)));
+                    }
                 };
                 // Upper writable copies are now stale and would shadow the
                 // new value; they must be invalidated, and a failed
@@ -549,8 +648,12 @@ where
                     if !self.tiers[tier].writable {
                         continue;
                     }
-                    if let Err(source) = self.tiers[tier].tier.delete(&key).await {
-                        failures.push(self.failure(tier, source));
+                    match self.tiers[tier].tier.delete(&key).await {
+                        Ok(_) => Counters::bump(&self.tiers[tier].counters.deletes, 1),
+                        Err(source) => {
+                            Counters::bump(&self.tiers[tier].counters.errors, 1);
+                            failures.push(self.failure(tier, source));
+                        }
                     }
                 }
                 if failures.is_empty() {
@@ -575,8 +678,12 @@ where
                 continue;
             }
             match slot.tier.delete(key).await {
-                Ok(present) => existed |= present,
+                Ok(present) => {
+                    Counters::bump(&slot.counters.deletes, 1);
+                    existed |= present;
+                }
                 Err(source) => {
+                    Counters::bump(&slot.counters.errors, 1);
                     failures.push(TierFailure::new(index, slot.tier.name(), source));
                 }
             }
@@ -604,6 +711,7 @@ where
                     }
                     match self.tiers[tier].tier.put_many(entries.clone()).await {
                         Ok(displaced) => {
+                            Counters::bump(&self.tiers[tier].counters.puts, entries.len() as u64);
                             if displaced.is_empty() {
                                 continue;
                             }
@@ -614,6 +722,7 @@ where
                             }
                         }
                         Err(source) => {
+                            Counters::bump(&self.tiers[tier].counters.errors, 1);
                             return Err(RouterError::Tier(self.failure(tier, source)));
                         }
                     }
@@ -625,8 +734,14 @@ where
                     return Err(RouterError::ReadOnly);
                 };
                 let displaced = match self.tiers[bottom].tier.put_many(entries.clone()).await {
-                    Ok(displaced) => displaced,
-                    Err(source) => return Err(RouterError::Tier(self.failure(bottom, source))),
+                    Ok(displaced) => {
+                        Counters::bump(&self.tiers[bottom].counters.puts, entries.len() as u64);
+                        displaced
+                    }
+                    Err(source) => {
+                        Counters::bump(&self.tiers[bottom].counters.errors, 1);
+                        return Err(RouterError::Tier(self.failure(bottom, source)));
+                    }
                 };
                 let keys: Vec<K> = entries.into_iter().map(|(key, _)| key).collect();
                 let mut failures = Vec::new();
@@ -634,8 +749,14 @@ where
                     if !self.tiers[tier].writable {
                         continue;
                     }
-                    if let Err(source) = self.tiers[tier].tier.delete_many(&keys).await {
-                        failures.push(self.failure(tier, source));
+                    match self.tiers[tier].tier.delete_many(&keys).await {
+                        Ok(_) => {
+                            Counters::bump(&self.tiers[tier].counters.deletes, keys.len() as u64);
+                        }
+                        Err(source) => {
+                            Counters::bump(&self.tiers[tier].counters.errors, 1);
+                            failures.push(self.failure(tier, source));
+                        }
                     }
                 }
                 if failures.is_empty() {
@@ -677,6 +798,7 @@ where
         self.tiers.push(TierSlot {
             tier: Box::new(Adapter(tier)),
             writable: true,
+            counters: Counters::default(),
         });
         self
     }
@@ -698,6 +820,7 @@ where
         self.tiers.push(TierSlot {
             tier: Box::new(ReadOnly(tier)),
             writable: false,
+            counters: Counters::default(),
         });
         self
     }

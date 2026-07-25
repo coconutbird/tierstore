@@ -399,6 +399,38 @@ fn batched_miss_past_failing_tier_is_inconclusive() {
 }
 
 #[test]
+fn stats_count_per_tier_activity() {
+    let hot = Arc::new(MemoryTier::unbounded());
+    let cold = Arc::new(MemoryTier::unbounded());
+    let router = Router::builder()
+        .tier(Arc::clone(&hot))
+        .tier(Arc::clone(&cold))
+        .build();
+
+    block_on(router.put(key("k"), key("v"))).expect("put");
+    assert_eq!(
+        block_on(router.get(&key("k"))).expect("get"),
+        Some(key("v"))
+    );
+    assert_eq!(block_on(router.get(&key("absent"))).expect("miss"), None);
+
+    let stats = router.stats();
+    assert_eq!(stats.len(), 2);
+    assert_eq!(stats[0].name, "memory");
+    assert!(!stats[0].read_only);
+    // Write-through wrote both tiers.
+    assert_eq!(stats[0].puts, 1);
+    assert_eq!(stats[1].puts, 1);
+    // The hit was served from hot; cold was never probed for it.
+    assert_eq!(stats[0].hits, 1);
+    assert_eq!(stats[1].hits, 0);
+    // The confirmed miss probed both tiers.
+    assert_eq!(stats[0].misses, 1);
+    assert_eq!(stats[1].misses, 1);
+    assert_eq!(stats[0].errors, 0);
+}
+
+#[test]
 fn routers_compose_as_tiers_of_routers() {
     let hot = Arc::new(MemoryTier::unbounded());
     let warm = Arc::new(MemoryTier::unbounded());

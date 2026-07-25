@@ -8,8 +8,21 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use tierstore_core::{Displaced, Page, Tier, TierList, TierRead, TierReadRef, TierWrite};
 
+/// Eviction ordering for [`MemoryTier`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Eviction {
+    /// Evict in insertion order; reads do not affect eviction. Replacing a
+    /// value keeps its queue position.
+    #[default]
+    Fifo,
+    /// Evict the least recently *used* entry: reads (`get`, `get_many`,
+    /// `get_ref`) and replacements refresh recency. Existence checks do
+    /// not.
+    Lru,
+}
+
 /// A shared in-memory map with optional entry-count and byte-budget bounds
-/// and FIFO eviction.
+/// and FIFO or LRU eviction.
 ///
 /// Bounds compose with rollover: displaced entries are returned from
 /// [`TierWrite::put`] so a router demotes them instead of dropping them.
@@ -17,14 +30,16 @@ use tierstore_core::{Displaced, Page, Tier, TierList, TierRead, TierReadRef, Tie
 /// *immediately* (including itself), which under a router means oversized
 /// values roll straight through to the next tier down.
 ///
-/// Eviction is FIFO (insertion order) for now — deliberately the simplest
-/// policy that exercises displacement; pluggable strategies (LRU, LFU) are
-/// an open design question.
+/// Eviction order defaults to FIFO; opt into LRU with
+/// [`MemoryTier::with_eviction`]. Recency is tracked with stamped queue
+/// tickets (stale tickets are skipped and periodically compacted), so
+/// touches and deletes stay amortised O(1).
 ///
 /// This tier cannot fail: its error type is [`Infallible`].
 pub struct MemoryTier<K, V> {
     max_entries: Option<NonZeroUsize>,
     bytes: Option<ByteBudget<K, V>>,
+    eviction: Eviction,
     inner: Mutex<Inner<K, V>>,
 }
 
@@ -47,57 +62,132 @@ struct Limits {
 struct Entry<V> {
     value: V,
     weight: usize,
+    /// Matches the entry's live ticket in `order`; older tickets are stale.
+    stamp: u64,
 }
 
 #[derive(Debug)]
 struct Inner<K, V> {
     map: HashMap<K, Entry<V>>,
-    /// Insertion order, used both for FIFO eviction and stable listing.
-    order: VecDeque<K>,
+    /// Eviction queue of `(key, stamp)` tickets. A ticket is live iff the
+    /// map entry's stamp matches; touches push fresh tickets and stale ones
+    /// are skipped on eviction and dropped by [`Inner::compact`].
+    order: VecDeque<(K, u64)>,
     /// Sum of entry weights (0 unless a byte budget is configured).
     total_weight: usize,
+    next_stamp: u64,
 }
 
-/// All mutation lives on `Inner`, which owns the "map, order, and weight
+/// All mutation lives on `Inner`, which owns the "map, tickets, and weight
 /// total stay in sync" invariant; the async tier methods lock, delegate,
 /// and let the guard drop as a temporary.
 impl<K, V> Inner<K, V>
 where
     K: Eq + Hash + Clone,
 {
-    fn insert(&mut self, key: K, value: V, weight: usize, limits: Limits) -> Displaced<K, V> {
+    const fn fresh_stamp(&mut self) -> u64 {
+        self.next_stamp += 1;
+        self.next_stamp
+    }
+
+    fn insert(
+        &mut self,
+        key: K,
+        value: V,
+        weight: usize,
+        limits: Limits,
+        eviction: Eviction,
+    ) -> Displaced<K, V> {
+        let stamp = self.fresh_stamp();
         if let Some(entry) = self.map.get_mut(&key) {
-            // Replacement: position in `order` kept; weight adjusted, and a
-            // heavier value can overflow the byte budget.
+            // Replacement: weight adjusted, and a heavier value can
+            // overflow the byte budget. FIFO keeps the original queue
+            // position; LRU counts a replacement as a use.
             let old = entry.weight;
             entry.value = value;
             entry.weight = weight;
+            if matches!(eviction, Eviction::Lru) {
+                entry.stamp = stamp;
+                self.order.push_back((key, stamp));
+            }
             self.total_weight = self.total_weight.saturating_add(weight).saturating_sub(old);
-            return self.evict_over(limits);
+        } else {
+            self.map.insert(
+                key.clone(),
+                Entry {
+                    value,
+                    weight,
+                    stamp,
+                },
+            );
+            self.order.push_back((key, stamp));
+            self.total_weight = self.total_weight.saturating_add(weight);
         }
-        self.map.insert(key.clone(), Entry { value, weight });
-        self.order.push_back(key);
-        self.total_weight = self.total_weight.saturating_add(weight);
+        self.compact();
         self.evict_over(limits)
     }
 
-    fn insert_batch(&mut self, entries: Vec<(K, V, usize)>, limits: Limits) -> Displaced<K, V> {
+    fn insert_batch(
+        &mut self,
+        entries: Vec<(K, V, usize)>,
+        limits: Limits,
+        eviction: Eviction,
+    ) -> Displaced<K, V> {
         let mut displaced = Displaced::new();
         for (key, value, weight) in entries {
-            displaced.extend(self.insert(key, value, weight, limits));
+            displaced.extend(self.insert(key, value, weight, limits, eviction));
         }
         displaced
     }
 
-    /// FIFO-evicts until back under every configured bound. The newest
-    /// entry is evicted last, so an entry that can never fit is displaced
-    /// too — rollover then pushes it straight down a tier.
+    /// Refreshes `key`'s recency with a new ticket (LRU path).
+    fn touch(&mut self, key: &K) {
+        let stamp = self.fresh_stamp();
+        if let Some(entry) = self.map.get_mut(key) {
+            entry.stamp = stamp;
+            self.order.push_back((key.clone(), stamp));
+        }
+        self.compact();
+    }
+
+    fn fetch(&mut self, key: &K, eviction: Eviction) -> Option<V>
+    where
+        V: Clone,
+    {
+        if matches!(eviction, Eviction::Lru) && self.map.contains_key(key) {
+            self.touch(key);
+        }
+        self.map.get(key).map(|entry| entry.value.clone())
+    }
+
+    fn fetch_batch(&mut self, keys: &[K], eviction: Eviction) -> Vec<Option<V>>
+    where
+        V: Clone,
+    {
+        let mut values = Vec::with_capacity(keys.len());
+        for key in keys {
+            values.push(self.fetch(key, eviction));
+        }
+        values
+    }
+
+    /// Evicts until back under every configured bound, in ticket order,
+    /// skipping stale tickets. The newest entry is evicted last, so an
+    /// entry that can never fit is displaced too — rollover then pushes it
+    /// straight down a tier.
     fn evict_over(&mut self, limits: Limits) -> Displaced<K, V> {
         let mut displaced = Displaced::new();
         while self.over(limits) {
-            let Some(oldest) = self.order.pop_front() else {
+            let Some((oldest, stamp)) = self.order.pop_front() else {
                 break;
             };
+            let live = self
+                .map
+                .get(&oldest)
+                .is_some_and(|entry| entry.stamp == stamp);
+            if !live {
+                continue;
+            }
             if let Some(entry) = self.map.remove(&oldest) {
                 self.total_weight = self.total_weight.saturating_sub(entry.weight);
                 displaced.push((oldest, entry.value));
@@ -116,36 +206,44 @@ where
             return false;
         };
         self.total_weight = self.total_weight.saturating_sub(entry.weight);
-        // O(n), acceptable for a hot tier of bounded size.
-        self.order.retain(|k| k != key);
+        // The queue ticket goes stale and is skipped/compacted later — no
+        // O(n) scan on the delete path.
         true
-    }
-
-    fn page(&self, cursor: Option<usize>, limit: usize) -> Page<K, usize> {
-        let offset = cursor.unwrap_or(0);
-        let keys: Vec<K> = self
-            .order
-            .iter()
-            .skip(offset)
-            .take(limit)
-            .cloned()
-            .collect();
-        let end = offset.saturating_add(keys.len());
-        let next = (limit > 0 && end < self.order.len()).then_some(end);
-        Page { keys, next }
-    }
-
-    fn get_batch(&self, keys: &[K]) -> Vec<Option<V>>
-    where
-        V: Clone,
-    {
-        keys.iter()
-            .map(|key| self.map.get(key).map(|entry| entry.value.clone()))
-            .collect()
     }
 
     fn remove_batch(&mut self, keys: &[K]) -> Vec<bool> {
         keys.iter().map(|key| self.remove(key)).collect()
+    }
+
+    /// Drops stale tickets once they dominate the queue, keeping eviction
+    /// amortised O(1) without a linked map.
+    fn compact(&mut self) {
+        if self.order.len() > self.map.len().saturating_mul(2).max(16) {
+            let map = &self.map;
+            self.order
+                .retain(|(key, stamp)| map.get(key).is_some_and(|entry| entry.stamp == *stamp));
+        }
+    }
+
+    /// One page of live keys in ticket order (insertion order under FIFO,
+    /// least-recently-used-first under LRU) — i.e. eviction order.
+    fn page(&self, cursor: Option<usize>, limit: usize) -> Page<K, usize> {
+        let live: Vec<&K> = self
+            .order
+            .iter()
+            .filter(|(key, stamp)| self.map.get(key).is_some_and(|entry| entry.stamp == *stamp))
+            .map(|(key, _)| key)
+            .collect();
+        let offset = cursor.unwrap_or(0);
+        let keys: Vec<K> = live
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|&key| key.clone())
+            .collect();
+        let end = offset.saturating_add(keys.len());
+        let next = (limit > 0 && end < live.len()).then_some(end);
+        Page { keys, next }
     }
 }
 
@@ -156,16 +254,18 @@ impl<K, V> MemoryTier<K, V> {
         Self {
             max_entries: None,
             bytes: None,
+            eviction: Eviction::Fifo,
             inner: Mutex::new(Inner {
                 map: HashMap::new(),
                 order: VecDeque::new(),
                 total_weight: 0,
+                next_stamp: 0,
             }),
         }
     }
 
     /// A tier holding at most `capacity` entries; inserts beyond that
-    /// displace the oldest entries.
+    /// displace entries in eviction order.
     #[must_use]
     pub fn bounded(capacity: NonZeroUsize) -> Self {
         Self {
@@ -176,8 +276,9 @@ impl<K, V> MemoryTier<K, V> {
 
     /// A tier bounded by total weight: `weigh` prices each entry (typically
     /// its byte size), and inserts that push the total over `budget`
-    /// displace the oldest entries until it fits again. An entry heavier
-    /// than the whole budget is displaced immediately, itself included.
+    /// displace entries in eviction order until it fits again. An entry
+    /// heavier than the whole budget is displaced immediately, itself
+    /// included.
     ///
     /// # Example
     ///
@@ -203,6 +304,24 @@ impl<K, V> MemoryTier<K, V> {
             }),
             ..Self::unbounded()
         }
+    }
+
+    /// Sets the eviction ordering (default: [`Eviction::Fifo`]).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::num::NonZeroUsize;
+    /// use tierstore::{Eviction, MemoryTier};
+    ///
+    /// let tier: MemoryTier<String, String> =
+    ///     MemoryTier::bounded(NonZeroUsize::new(1024).unwrap())
+    ///         .with_eviction(Eviction::Lru);
+    /// ```
+    #[must_use]
+    pub const fn with_eviction(mut self, eviction: Eviction) -> Self {
+        self.eviction = eviction;
+        self
     }
 
     /// Current number of entries.
@@ -252,6 +371,7 @@ impl<K, V> std::fmt::Debug for MemoryTier<K, V> {
         f.debug_struct("MemoryTier")
             .field("max_entries", &self.max_entries)
             .field("byte_budget", &self.bytes.as_ref().map(|b| b.budget))
+            .field("eviction", &self.eviction)
             .field("len", &self.lock().map.len())
             .finish_non_exhaustive()
     }
@@ -273,16 +393,17 @@ where
     V: Clone + Send + Sync,
 {
     async fn get(&self, key: &K) -> Result<Option<V>, Infallible> {
-        Ok(self.lock().map.get(key).map(|entry| entry.value.clone()))
+        Ok(self.lock().fetch(key, self.eviction))
     }
 
+    /// Existence checks do not refresh LRU recency.
     async fn exists(&self, key: &K) -> Result<bool, Infallible> {
         Ok(self.lock().map.contains_key(key))
     }
 
     /// One lock acquisition for the whole batch, instead of one per key.
     async fn get_many(&self, keys: &[K]) -> Result<Vec<Option<V>>, Infallible> {
-        Ok(self.lock().get_batch(keys))
+        Ok(self.lock().fetch_batch(keys, self.eviction))
     }
 }
 
@@ -323,8 +444,11 @@ where
         Self: 'a;
 
     async fn get_ref<'s>(&'s self, key: &K) -> Result<Option<MemoryRef<'s, K, V>>, Infallible> {
-        let guard = self.lock();
+        let mut guard = self.lock();
         if guard.map.contains_key(key) {
+            if matches!(self.eviction, Eviction::Lru) {
+                guard.touch(key);
+            }
             Ok(Some(MemoryRef {
                 guard,
                 key: key.clone(),
@@ -342,7 +466,9 @@ where
 {
     async fn put(&self, key: K, value: V) -> Result<Displaced<K, V>, Infallible> {
         let weight = self.weight_of(&key, &value);
-        Ok(self.lock().insert(key, value, weight, self.limits()))
+        Ok(self
+            .lock()
+            .insert(key, value, weight, self.limits(), self.eviction))
     }
 
     async fn delete(&self, key: &K) -> Result<bool, Infallible> {
@@ -358,7 +484,9 @@ where
                 (key, value, weight)
             })
             .collect();
-        Ok(self.lock().insert_batch(weighted, self.limits()))
+        Ok(self
+            .lock()
+            .insert_batch(weighted, self.limits(), self.eviction))
     }
 
     /// One lock acquisition for the whole batch, instead of one per key.
@@ -425,6 +553,48 @@ mod tests {
         assert_eq!(block_on(tier.put("a", 10)).expect("infallible"), vec![]);
         assert_eq!(block_on(tier.get(&"a")).expect("infallible"), Some(10));
         assert_eq!(tier.len(), 2);
+    }
+
+    #[test]
+    fn fifo_ignores_touches() {
+        let tier = MemoryTier::bounded(cap(2));
+        block_on(tier.put("a", 1)).expect("infallible");
+        block_on(tier.put("b", 2)).expect("infallible");
+        // A read must not save `a` under FIFO.
+        assert_eq!(block_on(tier.get(&"a")).expect("infallible"), Some(1));
+        assert_eq!(
+            block_on(tier.put("c", 3)).expect("infallible"),
+            vec![("a", 1)]
+        );
+    }
+
+    #[test]
+    fn lru_touch_saves_the_touched_entry() {
+        let tier = MemoryTier::bounded(cap(2)).with_eviction(Eviction::Lru);
+        block_on(tier.put("a", 1)).expect("infallible");
+        block_on(tier.put("b", 2)).expect("infallible");
+        // Touching `a` makes `b` the least recently used.
+        assert_eq!(block_on(tier.get(&"a")).expect("infallible"), Some(1));
+        assert_eq!(
+            block_on(tier.put("c", 3)).expect("infallible"),
+            vec![("b", 2)]
+        );
+        assert_eq!(block_on(tier.get(&"a")).expect("infallible"), Some(1));
+    }
+
+    #[test]
+    fn stale_tickets_are_skipped_on_eviction() {
+        let tier = MemoryTier::bounded(cap(2)).with_eviction(Eviction::Lru);
+        block_on(tier.put("a", 1)).expect("infallible");
+        block_on(tier.put("b", 2)).expect("infallible");
+        assert!(block_on(tier.delete(&"a")).expect("infallible"));
+        block_on(tier.put("c", 3)).expect("infallible");
+        // The queue still holds a stale ticket for deleted `a`; eviction
+        // must skip it and displace `b`, the oldest live entry.
+        assert_eq!(
+            block_on(tier.put("d", 4)).expect("infallible"),
+            vec![("b", 2)]
+        );
     }
 
     #[test]
@@ -519,5 +689,17 @@ mod tests {
         let second = block_on(tier.list(first.next, 2)).expect("infallible");
         assert_eq!(second.keys, vec!["c"]);
         assert_eq!(second.next, None);
+    }
+
+    #[test]
+    fn lru_listing_reflects_recency_order() {
+        let tier = MemoryTier::unbounded().with_eviction(Eviction::Lru);
+        for key in ["a", "b", "c"] {
+            block_on(tier.put(key, ())).expect("infallible");
+        }
+        // Touch `a`: it becomes the most recently used, so it lists last.
+        block_on(tier.get(&"a")).expect("infallible");
+        let page = block_on(tier.list(None, 3)).expect("infallible");
+        assert_eq!(page.keys, vec!["b", "c", "a"]);
     }
 }
