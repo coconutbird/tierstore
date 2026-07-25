@@ -175,8 +175,9 @@ let cache = TieredCache::builder()
    and deadlock-free batched-`get` coalescing are open.
 6. Per-tier TTL / staleness, negative caching.
 7. Demotion churn when a lower tier is smaller than the one above it.
-8. Typed keys/values vs bytes: `DiskTier` is concrete (`String`/`Vec<u8>`);
-   a codec adapter tier would bridge typed hierarchies onto byte stores.
+8. Typed-over-bytes is shipped (`CodecTier`: one-way key mapping, value
+   codec embedding the original key so displacement decodes back typed);
+   per-entry encode-failure granularity in batches is open.
 9. `MemoryTier` offers FIFO and LRU ordering; LFU, segmented/scan-resistant
    policies, or a fully pluggable ordering trait are open.
 10. Static (generic tuple) tier composition to avoid boxing on the hot path.
