@@ -19,10 +19,15 @@ tierstore        std batteries, zero deps. Router (drives ReadFlow against
                  LimitedTier), SingleFlight, and two semantic presets built
                  entirely on the router: TieredCache (availability) and
                  TieredStore (authority).
-tierstore-mmap   First adapter crate: MmapDiskTier, a kernel-evictable
-                 zero-copy warm tier (file-per-key, served as mmap-backed
-                 bytes::Bytes, snapshot-on-overwrite). The template for
-                 backend adapters (redis, s3, postgres, …).
+tierstore-mmap   Adapter: MmapDiskTier, a kernel-evictable zero-copy warm
+                 tier (file-per-key, served as mmap-backed bytes::Bytes,
+                 snapshot-on-overwrite).
+tierstore-moka   Adapter: MokaTier, a sharded TinyLFU hot tier for
+                 high-throughput inclusive hierarchies (moka evicts
+                 internally, so it reports no displacement — use MemoryTier
+                 for exclusive rollover stacks).
+                 Together these are the template for backend adapters
+                 (redis, s3, postgres, …).
 ```
 
 Mechanism and policy are separated on purpose: the router executes, `Policy`

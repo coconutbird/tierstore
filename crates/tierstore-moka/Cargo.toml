@@ -1,0 +1,17 @@
+[package]
+name = "tierstore-moka"
+description = "moka-backed hot tier for tierstore: sharded, TinyLFU-admitted in-memory caching behind the tier traits"
+keywords = ["moka", "cache", "tiered", "lru", "tinylfu"]
+categories = ["caching", "asynchronous", "concurrency"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+tierstore-core.workspace = true
+moka.workspace = true
+
+[lints]
+workspace = true
