@@ -183,6 +183,9 @@ fn scan(root: &Path) -> io::Result<Inner> {
             continue;
         };
         let metadata = entry.metadata()?;
+        if !metadata.is_file() {
+            continue; // e.g. stray subdirectories from a foreign layout
+        }
         let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
         found.push((key, metadata.len(), modified));
     }
@@ -353,7 +356,11 @@ impl TierList for MmapDiskTier {
     async fn list(&self, cursor: Option<usize>, limit: usize) -> io::Result<Page<String, usize>> {
         let mut all = Vec::new();
         for entry in fs::read_dir(&self.root)? {
-            let name = entry?.file_name();
+            let entry = entry?;
+            if !entry.metadata()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             let Some(bytes) = hex_decode(name) else {
                 continue;
