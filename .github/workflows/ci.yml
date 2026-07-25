@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy (pedantic + nursery, deny warnings)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Tests (including doctests)
+        run: cargo test --workspace
+      - name: Core builds without alloc
+        run: cargo check -p tierstore-core --no-default-features
+      - name: Docs build cleanly
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Rollover demo proves out
+        run: cargo run -p rollover-demo

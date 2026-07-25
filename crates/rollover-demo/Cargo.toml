@@ -1,0 +1,24 @@
+[package]
+name = "rollover-demo"
+description = "Demo app proving hot(mmap)/warm(disk)/cold(remote) rollover caching on tierstore"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tierstore.workspace = true
+memmap2.workspace = true
+
+# Own lint table instead of `workspace = true`: creating a memory map
+# requires one `unsafe` call, which the workspace lints forbid. Everything
+# else stays at workspace strictness.
+[lints.rust]
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"

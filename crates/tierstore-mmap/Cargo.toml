@@ -1,0 +1,29 @@
+[package]
+name = "tierstore-mmap"
+description = "Kernel-evictable, zero-copy warm tier for tierstore: file-per-key storage served as mmap-backed bytes::Bytes"
+keywords = ["mmap", "cache", "tiered", "zero-copy", "storage"]
+categories = ["caching", "filesystem", "memory-management"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+tierstore-core.workspace = true
+bytes.workspace = true
+memmap2.workspace = true
+
+# Own lint table instead of `workspace = true`: creating a memory map
+# requires one `unsafe` call, which the workspace lints forbid. Everything
+# else stays at workspace strictness.
+[lints.rust]
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"

@@ -1,0 +1,16 @@
+[package]
+name = "tierstore"
+description = "Storage-tier router with batteries: memory/disk tiers, middleware, and tiered cache/store presets built on the generic core"
+keywords = ["tiered", "cache", "storage", "router", "rollover"]
+categories = ["caching", "asynchronous", "data-structures"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+tierstore-core.workspace = true
+
+[lints]
+workspace = true

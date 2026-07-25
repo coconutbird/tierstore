@@ -1,0 +1,20 @@
+[package]
+name = "tierstore-core"
+description = "no_std core for tierstore: tier capability traits, routing policy, and the sans-io read flow"
+keywords = ["tiered", "cache", "storage", "no-std", "sans-io"]
+categories = ["caching", "no-std", "asynchronous"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[features]
+default = ["alloc"]
+# Enables the write/list capabilities and `Arc` forwarding, which need `alloc`.
+alloc = []
+
+[dependencies]
+
+[lints]
+workspace = true
