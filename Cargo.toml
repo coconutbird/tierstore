@@ -12,7 +12,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/coconutbird/tierstore"
+repository = "https://github.com/napbat/tierstore"
 readme = "README.md"
 
 # Single source of truth for dependency versions, internal and external.
