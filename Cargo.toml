@@ -5,7 +5,6 @@ members = [
     "crates/tierstore",
     "crates/tierstore-mmap",
     "crates/tierstore-moka",
-    "crates/tierstore-groupnet",
     "crates/rollover-demo",
 ]
 
@@ -23,12 +22,6 @@ tierstore = { path = "crates/tierstore", version = "0.1.0" }
 bytes = "1"
 memmap2 = "0.9"
 moka = { version = "0.12", features = ["future"] }
-# TEMPORARY PIN: both groupnet crates must come from the same revision, and
-# groupnet-consistency lands with groupnet's feat/consistency branch. Flip
-# both back to branch = "main" the moment that branch merges.
-groupnet = { git = "https://github.com/napbat/groupnet", branch = "feat/consistency" }
-groupnet-consistency = { git = "https://github.com/napbat/groupnet", branch = "feat/consistency" }
-tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
