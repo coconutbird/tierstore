@@ -147,7 +147,7 @@ dependencies = [
 [[package]]
 name = "groupnet"
 version = "0.1.0"
-source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#b5455b706d7ee877866d73640ab2beaf16f1457a"
+source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#22cdf8878a5651d5148238fbdabddc95cb25f193"
 dependencies = [
  "groupnet-core",
  "groupnet-runtime",
@@ -158,7 +158,7 @@ dependencies = [
 [[package]]
 name = "groupnet-consistency"
 version = "0.1.0"
-source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#b5455b706d7ee877866d73640ab2beaf16f1457a"
+source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#22cdf8878a5651d5148238fbdabddc95cb25f193"
 dependencies = [
  "groupnet-core",
  "groupnet-runtime",
@@ -168,12 +168,12 @@ dependencies = [
 [[package]]
 name = "groupnet-core"
 version = "0.1.0"
-source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#b5455b706d7ee877866d73640ab2beaf16f1457a"
+source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#22cdf8878a5651d5148238fbdabddc95cb25f193"
 
 [[package]]
 name = "groupnet-runtime"
 version = "0.1.0"
-source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#b5455b706d7ee877866d73640ab2beaf16f1457a"
+source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#22cdf8878a5651d5148238fbdabddc95cb25f193"
 dependencies = [
  "groupnet-core",
  "groupnet-transport",
@@ -183,7 +183,7 @@ dependencies = [
 [[package]]
 name = "groupnet-transport"
 version = "0.1.0"
-source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#b5455b706d7ee877866d73640ab2beaf16f1457a"
+source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#22cdf8878a5651d5148238fbdabddc95cb25f193"
 dependencies = [
  "groupnet-core",
 ]
@@ -191,7 +191,7 @@ dependencies = [
 [[package]]
 name = "groupnet-transport-mem"
 version = "0.1.0"
-source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#b5455b706d7ee877866d73640ab2beaf16f1457a"
+source = "git+https://github.com/napbat/groupnet?branch=feat%2Fconsistency#22cdf8878a5651d5148238fbdabddc95cb25f193"
 dependencies = [
  "groupnet-core",
  "groupnet-transport",

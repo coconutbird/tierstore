@@ -44,6 +44,8 @@
 //! # Ok(()) }
 //! ```
 
+//! [`Bytes`]: bytes::Bytes
+
 mod tier;
 
 pub use tier::MmapDiskTier;

@@ -17,8 +17,8 @@ use tierstore_core::{Displaced, Page, Tier, TierList, TierRead, TierReadRange, T
 /// File-per-key tier serving mmap-backed, kernel-evictable [`Bytes`].
 ///
 /// Keys are hex-encoded into file names (no path traversal, no
-/// case-sensitivity hazards); values are raw bytes. See the [module
-/// docs](self) for the immutability/snapshot contract and disk bounding.
+/// case-sensitivity hazards); values are raw bytes. See the [crate
+/// docs](crate) for the immutability/snapshot contract and disk bounding.
 pub struct MmapDiskTier {
     root: PathBuf,
     budget: Option<NonZeroU64>,

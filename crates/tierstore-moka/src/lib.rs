@@ -31,6 +31,8 @@
 //!     });
 //! ```
 
+//! [`TierWrite::put`]: tierstore_core::TierWrite::put
+
 mod tier;
 
 pub use moka;
