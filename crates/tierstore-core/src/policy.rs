@@ -33,6 +33,21 @@ pub enum OnReadError {
     FailFast,
 }
 
+/// How write-through treats a tier that rejects a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnWriteError {
+    /// Abort on the first tier error; lower tiers keep what they already
+    /// accepted. The authoritative default.
+    #[default]
+    FailFast,
+    /// Skip the failing tier and keep writing the rest — cache-fill
+    /// semantics, where a failed fill is a capacity loss, not an operation
+    /// failure. Errors still surface in per-tier stats. Applies to the
+    /// write-through fan-out; a write-around bottom write always fails
+    /// loudly (it is the only real write).
+    BestEffort,
+}
+
 /// How writes propagate through the hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WriteMode {
@@ -67,6 +82,8 @@ pub struct Policy {
     pub read: ReadPolicy,
     /// Write-path behaviour.
     pub write: WriteMode,
+    /// Tolerance for tiers that reject writes during write-through.
+    pub on_write_error: OnWriteError,
     /// When an insert displaces entries from a tier, push them into the next
     /// tier down (cascading as needed) instead of dropping them. Entries
     /// displaced from the bottommost tier are evicted outright either way.

@@ -14,8 +14,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tierstore_core::{
-    Displaced, OnReadError, Policy, Probe, Promote, ReadFlow, ReadOutcome, ReadPolicy, ReadStep,
-    Tier, TierRead, TierWrite, WriteMode,
+    Displaced, OnReadError, OnWriteError, Policy, Probe, Promote, ReadFlow, ReadOutcome,
+    ReadPolicy, ReadStep, Tier, TierRead, TierWrite, WriteMode,
 };
 
 use crate::error::{BoxError, RouterError, TierFailure};
@@ -618,7 +618,14 @@ where
                         }
                         Err(source) => {
                             Counters::bump(&self.tiers[tier].counters.errors, 1);
-                            return Err(RouterError::Tier(self.failure(tier, source)));
+                            match self.policy.on_write_error {
+                                OnWriteError::FailFast => {
+                                    return Err(RouterError::Tier(self.failure(tier, source)));
+                                }
+                                // A failed fill is a capacity loss, not an
+                                // operation failure; the error is in stats.
+                                OnWriteError::BestEffort => {}
+                            }
                         }
                     }
                 }
@@ -723,7 +730,12 @@ where
                         }
                         Err(source) => {
                             Counters::bump(&self.tiers[tier].counters.errors, 1);
-                            return Err(RouterError::Tier(self.failure(tier, source)));
+                            match self.policy.on_write_error {
+                                OnWriteError::FailFast => {
+                                    return Err(RouterError::Tier(self.failure(tier, source)));
+                                }
+                                OnWriteError::BestEffort => {}
+                            }
                         }
                     }
                 }

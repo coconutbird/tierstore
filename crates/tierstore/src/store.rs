@@ -33,7 +33,8 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use tierstore_core::{
-    Displaced, OnReadError, Policy, Promote, ReadPolicy, Tier, TierRead, TierWrite, WriteMode,
+    Displaced, OnReadError, OnWriteError, Policy, Promote, ReadPolicy, Tier, TierRead, TierWrite,
+    WriteMode,
 };
 
 use crate::error::RouterError;
@@ -144,6 +145,7 @@ where
                 on_error: OnReadError::FailFast,
             },
             write: WriteMode::WriteThrough,
+            on_write_error: OnWriteError::FailFast,
             demote_displaced: true,
         }
     }

@@ -38,6 +38,7 @@
 //! ```
 
 mod cache;
+mod codec;
 mod disk;
 mod error;
 mod limited;
@@ -50,6 +51,7 @@ mod store;
 mod verified;
 
 pub use cache::{TieredCache, TieredCacheBuilder};
+pub use codec::{CodecError, CodecTier};
 pub use disk::DiskTier;
 pub use error::{BoxError, RouterError, TierFailure};
 pub use limited::LimitedTier;
@@ -60,7 +62,8 @@ pub use router::{Router, RouterBuilder, TierStats};
 pub use single_flight::{SingleFlight, SingleFlightGuard};
 pub use store::{StoreError, TieredStore, TieredStoreBuilder};
 pub use tierstore_core::{
-    Displaced, OnReadError, Page, Policy, Probe, Promote, ReadFlow, ReadOutcome, ReadPolicy,
-    ReadStep, Tier, TierList, TierRead, TierReadRange, TierReadRef, TierWrite, WriteMode,
+    Displaced, OnReadError, OnWriteError, Page, Policy, Probe, Promote, ReadFlow, ReadOutcome,
+    ReadPolicy, ReadStep, Tier, TierList, TierRead, TierReadRange, TierReadRef, TierWrite,
+    WriteMode,
 };
 pub use verified::{VerifiedTier, VerifyError};

@@ -16,7 +16,8 @@ use std::fmt;
 use std::hash::Hash;
 
 use tierstore_core::{
-    Displaced, OnReadError, Policy, Promote, ReadPolicy, TierRead, TierWrite, WriteMode,
+    Displaced, OnReadError, OnWriteError, Policy, Promote, ReadPolicy, TierRead, TierWrite,
+    WriteMode,
 };
 
 use crate::error::RouterError;
@@ -73,7 +74,8 @@ where
 
     /// The cache preset: exclusive promotion (each entry lives in roughly
     /// one cache tier, maximising combined capacity), rollover on eviction,
-    /// fall-through on tier errors, and write-through puts.
+    /// fall-through on tier read errors, and best-effort write-through —
+    /// a tier that rejects a fill is skipped, never blocking the others.
     #[must_use]
     pub const fn default_policy() -> Policy {
         Policy {
@@ -82,6 +84,7 @@ where
                 on_error: OnReadError::FallThrough,
             },
             write: WriteMode::WriteThrough,
+            on_write_error: OnWriteError::BestEffort,
             demote_displaced: true,
         }
     }

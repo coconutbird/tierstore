@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use common::{FailingTier, block_on};
 use tierstore::{
-    KeyStatus, MemoryTier, OnReadError, Policy, Promote, ReadPolicy, Router, RouterError, TierRead,
-    TierWrite, WriteMode,
+    KeyStatus, MemoryTier, OnReadError, OnWriteError, Policy, Promote, ReadPolicy, Router,
+    RouterError, TierRead, TierWrite, WriteMode,
 };
 
 const fn cap(n: usize) -> NonZeroUsize {
@@ -396,6 +396,28 @@ fn batched_miss_past_failing_tier_is_inconclusive() {
         Err(RouterError::Inconclusive(failures)) => assert_eq!(failures.len(), 1),
         other => panic!("expected inconclusive batch, got {other:?}"),
     }
+}
+
+#[test]
+fn best_effort_writes_skip_failing_tiers() {
+    let warm = Arc::new(MemoryTier::unbounded());
+    let router = Router::builder()
+        .tier(FailingTier::default())
+        .tier(Arc::clone(&warm))
+        .policy(Policy {
+            on_write_error: OnWriteError::BestEffort,
+            ..Policy::default()
+        })
+        .build();
+
+    // The failing tier is skipped; the healthy one is written; the caller
+    // sees success (a failed fill is a capacity loss, not a failure).
+    block_on(router.put(key("k"), key("v"))).expect("best-effort put");
+    assert_eq!(block_on(warm.get(&key("k"))).expect("warm"), Some(key("v")));
+
+    let stats = router.stats();
+    assert_eq!(stats[0].errors, 1, "the skipped failure lands in stats");
+    assert_eq!(stats[1].puts, 1);
 }
 
 #[test]

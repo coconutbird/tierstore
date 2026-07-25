@@ -49,7 +49,7 @@ pub mod policy;
 pub mod read;
 pub mod tier;
 
-pub use policy::{OnReadError, Policy, Promote, ReadPolicy, WriteMode};
+pub use policy::{OnReadError, OnWriteError, Policy, Promote, ReadPolicy, WriteMode};
 pub use read::{Probe, ReadFlow, ReadOutcome, ReadStep};
 #[cfg(feature = "alloc")]
 pub use tier::{Displaced, Page, TierList, TierWrite};
