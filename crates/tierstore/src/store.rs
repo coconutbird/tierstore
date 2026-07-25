@@ -298,6 +298,18 @@ where
         self
     }
 
+    /// Appends a read-only tier (e.g. a replicated snapshot the store can
+    /// serve from but must never mutate). Writes skip it.
+    #[must_use]
+    pub fn read_only_tier<T>(mut self, tier: T) -> Self
+    where
+        T: TierRead<Key = K, Value = V> + Send + Sync + 'static,
+        T::Error: StdError + Send + Sync + 'static,
+    {
+        self.router = self.router.read_only_tier(tier);
+        self
+    }
+
     /// Overrides the store policy.
     #[must_use]
     pub fn policy(mut self, policy: Policy) -> Self {

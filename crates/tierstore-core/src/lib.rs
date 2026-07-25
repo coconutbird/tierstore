@@ -53,4 +53,4 @@ pub use policy::{OnReadError, Policy, Promote, ReadPolicy, WriteMode};
 pub use read::{Probe, ReadFlow, ReadOutcome, ReadStep};
 #[cfg(feature = "alloc")]
 pub use tier::{Displaced, Page, TierList, TierWrite};
-pub use tier::{Tier, TierRead, TierReadRef};
+pub use tier::{Tier, TierRead, TierReadRange, TierReadRef};

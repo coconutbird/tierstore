@@ -10,7 +10,7 @@
 //! question.
 
 use core::future::Future;
-use core::ops::Deref;
+use core::ops::{Deref, Range};
 
 #[cfg(feature = "alloc")]
 use alloc::{sync::Arc, vec::Vec};
@@ -136,6 +136,36 @@ pub trait TierReadRef: Tier {
         &'s self,
         key: &Self::Key,
     ) -> impl Future<Output = Result<Option<Self::ValueRef<'s>>, Self::Error>> + Send;
+}
+
+/// Ranged-read capability for byte-oriented tiers: serve a slice of a value
+/// without materialising the whole thing.
+///
+/// This is the primitive for large-artifact stores (the `RandomRead` shape
+/// from shardstore-style engines): an mmap tier serves a range as a
+/// zero-copy slice, a file tier as one positional read, a remote tier as a
+/// range request. The returned value is of the tier's normal `Value` type,
+/// containing exactly the requested bytes.
+///
+/// Like [`TierReadRef`], this is a *direct-tier* capability — the router
+/// does not route ranges. Chunk-granular caching through a router is the
+/// same machinery with chunk keys (e.g. `(artifact, chunk_no)`), which
+/// composes with promotion, rollover, and single-flight for free.
+pub trait TierReadRange: Tier {
+    /// Reads exactly `range` (absolute byte offsets) of `key`'s value.
+    ///
+    /// A missing key is `Ok(None)`. A range that does not lie fully within
+    /// the value is a backend error, not a silent truncation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the backend error when the read failed or the range is out
+    /// of bounds.
+    fn read_range(
+        &self,
+        key: &Self::Key,
+        range: Range<u64>,
+    ) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>> + Send;
 }
 
 /// Write capability: inserts and deletes.
@@ -311,6 +341,17 @@ impl<T: TierReadRef> TierReadRef for Arc<T> {
         key: &Self::Key,
     ) -> impl Future<Output = Result<Option<Self::ValueRef<'s>>, Self::Error>> + Send {
         T::get_ref(self, key)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<T: TierReadRange> TierReadRange for Arc<T> {
+    fn read_range(
+        &self,
+        key: &Self::Key,
+        range: Range<u64>,
+    ) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>> + Send {
+        T::read_range(self, key, range)
     }
 }
 

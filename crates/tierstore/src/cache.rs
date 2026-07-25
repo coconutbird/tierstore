@@ -204,6 +204,20 @@ where
         self
     }
 
+    /// Appends a read-only tier — the lane for an origin the cache fills
+    /// from but never writes (an object store, a fetch-only service). Puts
+    /// populate the writable cache layers only, and invalidation clears
+    /// local copies while the origin re-serves the key afterwards.
+    #[must_use]
+    pub fn read_only_tier<T>(mut self, tier: T) -> Self
+    where
+        T: TierRead<Key = K, Value = V> + Send + Sync + 'static,
+        T::Error: std::error::Error + Send + Sync + 'static,
+    {
+        self.router = self.router.read_only_tier(tier);
+        self
+    }
+
     /// Overrides the cache policy.
     #[must_use]
     pub fn policy(mut self, policy: Policy) -> Self {

@@ -5,7 +5,10 @@
     reason = "shared across test binaries; not every test file uses every helper"
 )]
 
+use std::collections::HashMap;
+use std::convert::Infallible;
 use std::future::Future;
+use std::hash::Hash;
 use std::io;
 use std::marker::PhantomData;
 use std::pin::pin;
@@ -14,6 +17,46 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use tierstore::{Displaced, Page, Tier, TierList, TierRead, TierWrite};
+
+/// A fetch-only origin: implements `TierRead` and deliberately NOT
+/// `TierWrite`, so the type system proves the router's read-only lane never
+/// needs stub write methods.
+#[derive(Debug)]
+pub struct ReadOnlySource<K, V> {
+    data: HashMap<K, V>,
+}
+
+impl<K: Eq + Hash, V> ReadOnlySource<K, V> {
+    pub fn new(entries: impl IntoIterator<Item = (K, V)>) -> Self {
+        Self {
+            data: entries.into_iter().collect(),
+        }
+    }
+}
+
+impl<K, V> Tier for ReadOnlySource<K, V> {
+    type Key = K;
+    type Value = V;
+    type Error = Infallible;
+
+    fn name(&self) -> &'static str {
+        "read-only-source"
+    }
+}
+
+impl<K, V> TierRead for ReadOnlySource<K, V>
+where
+    K: Eq + Hash + Sync,
+    V: Clone + Send + Sync,
+{
+    async fn get(&self, key: &K) -> Result<Option<V>, Infallible> {
+        Ok(self.data.get(key).cloned())
+    }
+
+    async fn exists(&self, key: &K) -> Result<bool, Infallible> {
+        Ok(self.data.contains_key(key))
+    }
+}
 
 /// Minimal executor: every future in this test suite is either ready or
 /// spin-poll-able, so a noop waker suffices.

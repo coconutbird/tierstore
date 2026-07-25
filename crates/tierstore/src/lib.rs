@@ -59,6 +59,6 @@ pub use single_flight::{SingleFlight, SingleFlightGuard};
 pub use store::{StoreError, TieredStore, TieredStoreBuilder};
 pub use tierstore_core::{
     Displaced, OnReadError, Page, Policy, Probe, Promote, ReadFlow, ReadOutcome, ReadPolicy,
-    ReadStep, Tier, TierList, TierRead, TierReadRef, TierWrite, WriteMode,
+    ReadStep, Tier, TierList, TierRead, TierReadRange, TierReadRef, TierWrite, WriteMode,
 };
 pub use verified::{VerifiedTier, VerifyError};

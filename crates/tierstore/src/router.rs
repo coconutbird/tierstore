@@ -78,6 +78,57 @@ where
     }
 }
 
+/// Read-only facade: reads forward; the router never routes writes here (it
+/// skips non-writable slots), so the write methods exist only to satisfy the
+/// object trait and fail loudly if a bug ever reaches them.
+struct ReadOnly<T>(T);
+
+impl<K, V, T> DynTier<K, V> for ReadOnly<T>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    T: TierRead<Key = K, Value = V> + Send + Sync + 'static,
+    T::Error: StdError + Send + Sync + 'static,
+{
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn get<'a>(&'a self, key: &'a K) -> BoxFuture<'a, Result<Option<V>, BoxError>> {
+        Box::pin(async move { self.0.get(key).await.map_err(Into::into) })
+    }
+
+    fn exists<'a>(&'a self, key: &'a K) -> BoxFuture<'a, Result<bool, BoxError>> {
+        Box::pin(async move { self.0.exists(key).await.map_err(Into::into) })
+    }
+
+    fn get_many<'a>(&'a self, keys: &'a [K]) -> BoxFuture<'a, Result<Vec<Option<V>>, BoxError>> {
+        Box::pin(async move { self.0.get_many(keys).await.map_err(Into::into) })
+    }
+
+    fn put(&self, _key: K, _value: V) -> BoxFuture<'_, Result<Displaced<K, V>, BoxError>> {
+        Box::pin(async { Err("tier is read-only".into()) })
+    }
+
+    fn delete<'a>(&'a self, _key: &'a K) -> BoxFuture<'a, Result<bool, BoxError>> {
+        Box::pin(async { Err("tier is read-only".into()) })
+    }
+
+    fn put_many(&self, _entries: Vec<(K, V)>) -> BoxFuture<'_, Result<Displaced<K, V>, BoxError>> {
+        Box::pin(async { Err("tier is read-only".into()) })
+    }
+
+    fn delete_many<'a>(&'a self, _keys: &'a [K]) -> BoxFuture<'a, Result<Vec<bool>, BoxError>> {
+        Box::pin(async { Err("tier is read-only".into()) })
+    }
+}
+
+/// One routed tier plus its write capability.
+struct TierSlot<K, V> {
+    tier: Box<dyn DynTier<K, V>>,
+    writable: bool,
+}
+
 /// Routes reads and writes across an ordered stack of tiers.
 ///
 /// Tier `0` is the topmost (fastest); reads probe downward. Behaviour is
@@ -95,21 +146,33 @@ where
 /// assert_eq!(router.tier_count(), 2);
 /// ```
 pub struct Router<K, V> {
-    tiers: Vec<Box<dyn DynTier<K, V>>>,
+    tiers: Vec<TierSlot<K, V>>,
     policy: Policy,
 }
 
 /// Builder for [`Router`]; add tiers top-down.
 pub struct RouterBuilder<K, V> {
-    tiers: Vec<Box<dyn DynTier<K, V>>>,
+    tiers: Vec<TierSlot<K, V>>,
     policy: Policy,
+}
+
+fn slot_names<K, V>(slots: &[TierSlot<K, V>]) -> Vec<String> {
+    slots
+        .iter()
+        .map(|slot| {
+            if slot.writable {
+                slot.tier.name().to_owned()
+            } else {
+                format!("{} (read-only)", slot.tier.name())
+            }
+        })
+        .collect()
 }
 
 impl<K, V> fmt::Debug for Router<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let names: Vec<&str> = self.tiers.iter().map(|tier| tier.name()).collect();
         f.debug_struct("Router")
-            .field("tiers", &names)
+            .field("tiers", &slot_names(&self.tiers))
             .field("policy", &self.policy)
             .finish()
     }
@@ -117,9 +180,8 @@ impl<K, V> fmt::Debug for Router<K, V> {
 
 impl<K, V> fmt::Debug for RouterBuilder<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let names: Vec<&str> = self.tiers.iter().map(|tier| tier.name()).collect();
         f.debug_struct("RouterBuilder")
-            .field("tiers", &names)
+            .field("tiers", &slot_names(&self.tiers))
             .field("policy", &self.policy)
             .finish()
     }
@@ -147,7 +209,7 @@ where
 
     /// Number of tiers in the stack.
     #[must_use]
-    pub fn tier_count(&self) -> usize {
+    pub const fn tier_count(&self) -> usize {
         self.tiers.len()
     }
 
@@ -162,9 +224,15 @@ where
         let mut current = entries;
         let mut target = from + 1;
         while target < self.tiers.len() && !current.is_empty() {
+            // Read-only tiers cannot receive demotions: entries pass over
+            // them to the next writable tier (or off the bottom).
+            if !self.tiers[target].writable {
+                target += 1;
+                continue;
+            }
             let mut next = Displaced::new();
             for (key, value) in current {
-                if let Ok(mut displaced) = self.tiers[target].put(key, value).await {
+                if let Ok(mut displaced) = self.tiers[target].tier.put(key, value).await {
                     next.append(&mut displaced);
                 }
             }
@@ -175,7 +243,7 @@ where
     }
 
     fn failure(&self, tier: usize, source: BoxError) -> TierFailure {
-        TierFailure::new(tier, self.tiers[tier].name(), source)
+        TierFailure::new(tier, self.tiers[tier].tier.name(), source)
     }
 
     /// Best-effort batched promotion after a batched read: for every tier
@@ -209,7 +277,10 @@ where
                 Promote::Never => return,
             };
             for target in targets {
-                if let Ok(displaced) = self.tiers[target].put_many(entries.clone()).await
+                if !self.tiers[target].writable {
+                    continue;
+                }
+                if let Ok(displaced) = self.tiers[target].tier.put_many(entries.clone()).await
                     && self.policy.demote_displaced
                     && !displaced.is_empty()
                 {
@@ -233,7 +304,7 @@ where
         let mut statuses: Vec<KeyStatus<V>> = vec![KeyStatus::Miss; keys.len()];
         let mut unresolved: Vec<usize> = (0..keys.len()).collect();
         let mut failures = Vec::new();
-        for (tier_index, tier) in self.tiers.iter().enumerate() {
+        for (tier_index, slot) in self.tiers.iter().enumerate() {
             if unresolved.is_empty() {
                 break;
             }
@@ -241,7 +312,7 @@ where
                 .iter()
                 .map(|&index| keys[index].clone())
                 .collect();
-            match tier.get_many(&subset).await {
+            match slot.tier.get_many(&subset).await {
                 Ok(found) => {
                     let mut still_missing = Vec::new();
                     for (&index, value) in unresolved.iter().zip(found) {
@@ -277,21 +348,25 @@ where
         Ok(ReadReport { statuses, failures })
     }
 
-    /// Batched delete with per-key outcomes. Every tier is attempted for
-    /// every key regardless of failures (skipping a tier guarantees
-    /// resurrection); check [`DeleteReport::is_complete`] before trusting
-    /// the flags.
+    /// Batched delete with per-key outcomes. Every *writable* tier is
+    /// attempted for every key regardless of failures (skipping one
+    /// guarantees resurrection); read-only tiers are untouched — their
+    /// copies persist by nature. Check [`DeleteReport::is_complete`] before
+    /// trusting the flags.
     pub async fn remove_many(&self, keys: &[K]) -> DeleteReport {
         let mut removed = vec![false; keys.len()];
         let mut failures = Vec::new();
-        for (index, tier) in self.tiers.iter().enumerate() {
-            match tier.delete_many(keys).await {
+        for (index, slot) in self.tiers.iter().enumerate() {
+            if !slot.writable {
+                continue;
+            }
+            match slot.tier.delete_many(keys).await {
                 Ok(flags) => {
-                    for (slot, flag) in removed.iter_mut().zip(flags) {
-                        *slot |= flag;
+                    for (removed_flag, flag) in removed.iter_mut().zip(flags) {
+                        *removed_flag |= flag;
                     }
                 }
-                Err(source) => failures.push(TierFailure::new(index, tier.name(), source)),
+                Err(source) => failures.push(TierFailure::new(index, slot.tier.name(), source)),
             }
         }
         DeleteReport { removed, failures }
@@ -319,7 +394,7 @@ where
         let mut failures = Vec::new();
         loop {
             match flow.step() {
-                ReadStep::Get { tier } => match self.tiers[tier].get(key).await {
+                ReadStep::Get { tier } => match self.tiers[tier].tier.get(key).await {
                     Ok(Some(value)) => {
                         hit = Some(value);
                         flow.on_get(Probe::Hit);
@@ -331,12 +406,14 @@ where
                     }
                 },
                 ReadStep::Promote { tier } => {
-                    if let Some(value) = &hit {
+                    if self.tiers[tier].writable
+                        && let Some(value) = &hit
+                    {
                         // Best effort: a failed promotion must not fail the
                         // read. Entries the promotion displaces roll over
                         // into the next tier down.
                         if let Ok(displaced) =
-                            self.tiers[tier].put(key.clone(), value.clone()).await
+                            self.tiers[tier].tier.put(key.clone(), value.clone()).await
                             && self.policy.demote_displaced
                             && !displaced.is_empty()
                         {
@@ -373,7 +450,7 @@ where
         let mut failures = Vec::new();
         loop {
             match flow.step() {
-                ReadStep::Get { tier } => match self.tiers[tier].exists(key).await {
+                ReadStep::Get { tier } => match self.tiers[tier].tier.exists(key).await {
                     Ok(true) => flow.on_get(Probe::Hit),
                     Ok(false) => flow.on_get(Probe::Miss),
                     Err(source) => {
@@ -424,12 +501,19 @@ where
     async fn put(&self, key: K, value: V) -> Result<Displaced<K, V>, RouterError> {
         match self.policy.write {
             WriteMode::WriteThrough => {
+                if !self.tiers.iter().any(|slot| slot.writable) {
+                    return Err(RouterError::ReadOnly);
+                }
                 let mut evicted = Displaced::new();
                 // Bottom-up: lower tiers accept the key before upper tiers
                 // reference it, so an aborted write never leaves an upper
-                // tier claiming a key its backing tiers rejected.
+                // tier claiming a key its backing tiers rejected. Read-only
+                // tiers are skipped: the router never writes them.
                 for tier in (0..self.tiers.len()).rev() {
-                    match self.tiers[tier].put(key.clone(), value.clone()).await {
+                    if !self.tiers[tier].writable {
+                        continue;
+                    }
+                    match self.tiers[tier].tier.put(key.clone(), value.clone()).await {
                         Ok(displaced) => {
                             if displaced.is_empty() {
                                 continue;
@@ -448,17 +532,24 @@ where
                 Ok(evicted)
             }
             WriteMode::WriteAround => {
-                let bottom = self.tiers.len() - 1;
-                let displaced = match self.tiers[bottom].put(key.clone(), value).await {
+                let Some(bottom) = self.tiers.iter().rposition(|slot| slot.writable) else {
+                    return Err(RouterError::ReadOnly);
+                };
+                let displaced = match self.tiers[bottom].tier.put(key.clone(), value).await {
                     Ok(displaced) => displaced,
                     Err(source) => return Err(RouterError::Tier(self.failure(bottom, source))),
                 };
-                // Upper copies are now stale and would shadow the new value;
-                // they must be invalidated, and a failed invalidation must
-                // surface (it means reads can return the old value).
+                // Upper writable copies are now stale and would shadow the
+                // new value; they must be invalidated, and a failed
+                // invalidation must surface (it means reads can return the
+                // old value). Read-only uppers were never written by the
+                // router, so there is nothing to invalidate there.
                 let mut failures = Vec::new();
                 for tier in 0..bottom {
-                    if let Err(source) = self.tiers[tier].delete(&key).await {
+                    if !self.tiers[tier].writable {
+                        continue;
+                    }
+                    if let Err(source) = self.tiers[tier].tier.delete(&key).await {
                         failures.push(self.failure(tier, source));
                     }
                 }
@@ -472,15 +563,21 @@ where
     }
 
     async fn delete(&self, key: &K) -> Result<bool, RouterError> {
-        // Attempt every tier even after failures: leaving a copy in a lower
-        // tier because an upper one errored would guarantee resurrection.
+        // Attempt every writable tier even after failures: leaving a copy in
+        // a lower tier because an upper one errored would guarantee
+        // resurrection. Read-only tiers are untouched — a key present there
+        // will be served again once local copies are gone (resurrection by
+        // design for an origin the router does not own).
         let mut existed = false;
         let mut failures = Vec::new();
-        for (index, tier) in self.tiers.iter().enumerate() {
-            match tier.delete(key).await {
+        for (index, slot) in self.tiers.iter().enumerate() {
+            if !slot.writable {
+                continue;
+            }
+            match slot.tier.delete(key).await {
                 Ok(present) => existed |= present,
                 Err(source) => {
-                    failures.push(TierFailure::new(index, tier.name(), source));
+                    failures.push(TierFailure::new(index, slot.tier.name(), source));
                 }
             }
         }
@@ -497,9 +594,15 @@ where
     async fn put_many(&self, entries: Vec<(K, V)>) -> Result<Displaced<K, V>, RouterError> {
         match self.policy.write {
             WriteMode::WriteThrough => {
+                if !self.tiers.iter().any(|slot| slot.writable) {
+                    return Err(RouterError::ReadOnly);
+                }
                 let mut evicted = Displaced::new();
                 for tier in (0..self.tiers.len()).rev() {
-                    match self.tiers[tier].put_many(entries.clone()).await {
+                    if !self.tiers[tier].writable {
+                        continue;
+                    }
+                    match self.tiers[tier].tier.put_many(entries.clone()).await {
                         Ok(displaced) => {
                             if displaced.is_empty() {
                                 continue;
@@ -518,15 +621,20 @@ where
                 Ok(evicted)
             }
             WriteMode::WriteAround => {
-                let bottom = self.tiers.len() - 1;
-                let displaced = match self.tiers[bottom].put_many(entries.clone()).await {
+                let Some(bottom) = self.tiers.iter().rposition(|slot| slot.writable) else {
+                    return Err(RouterError::ReadOnly);
+                };
+                let displaced = match self.tiers[bottom].tier.put_many(entries.clone()).await {
                     Ok(displaced) => displaced,
                     Err(source) => return Err(RouterError::Tier(self.failure(bottom, source))),
                 };
                 let keys: Vec<K> = entries.into_iter().map(|(key, _)| key).collect();
                 let mut failures = Vec::new();
                 for tier in 0..bottom {
-                    if let Err(source) = self.tiers[tier].delete_many(&keys).await {
+                    if !self.tiers[tier].writable {
+                        continue;
+                    }
+                    if let Err(source) = self.tiers[tier].tier.delete_many(&keys).await {
                         failures.push(self.failure(tier, source));
                     }
                 }
@@ -566,7 +674,31 @@ where
         T: TierRead<Key = K, Value = V> + TierWrite + Send + Sync + 'static,
         T::Error: StdError + Send + Sync + 'static,
     {
-        self.tiers.push(Box::new(Adapter(tier)));
+        self.tiers.push(TierSlot {
+            tier: Box::new(Adapter(tier)),
+            writable: true,
+        });
+        self
+    }
+
+    /// Appends a tier the router reads from but never writes to: writes,
+    /// demotions, promotions, and deletes all skip it — the lane for an
+    /// origin this process does not own (an object store, a replicated
+    /// snapshot). Only [`TierRead`] is required, so fetch-only backends fit
+    /// without stub write methods.
+    ///
+    /// Note the delete caveat: a key present in a read-only tier will be
+    /// served again once local copies are gone — resurrection by design.
+    #[must_use]
+    pub fn read_only_tier<T>(mut self, tier: T) -> Self
+    where
+        T: TierRead<Key = K, Value = V> + Send + Sync + 'static,
+        T::Error: StdError + Send + Sync + 'static,
+    {
+        self.tiers.push(TierSlot {
+            tier: Box::new(ReadOnly(tier)),
+            writable: false,
+        });
         self
     }
 

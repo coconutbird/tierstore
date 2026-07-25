@@ -122,12 +122,45 @@ graduate into a real tier once we're happy with it.
   size` instead of `callers × value size`. Single-flight already dedupes
   same-key fills; this bounds distinct-key fan-in.
 
+## The docres shape (node-local layered storage)
+
+The target deployment: a node that caches an authoritative remote store
+locally — a docres/shardstore-style artifact node.
+
+```rust
+let cache = TieredCache::builder()
+    .tier(MemoryTier::bounded_bytes(ram_budget, |_, v: &Bytes| v.len()))
+    .tier(MmapDiskTier::open_bounded(cache_dir, disk_budget)?)
+    .read_only_tier(LimitedTier::new(
+        VerifiedTier::new(object_store_tier, checksum),
+        max_inflight,
+    ))
+    .build();
+```
+
+- **The origin is `read_only_tier`** — only `TierRead` is required (no stub
+  writes), the cache never writes or deletes through it, puts fill the
+  cache layers, and invalidation clears local copies while the origin
+  re-serves the key afterwards (resurrection by design for data you don't
+  own).
+- **Disk is bounded**: `MmapDiskTier::open_bounded` FIFO-evicts over its
+  byte budget, rebuilds accounting from file sizes/mtimes on restart, and
+  serves displaced values zero-copy from the evicted files themselves.
+- **Partial reads**: `TierReadRange::read_range` serves byte ranges without
+  materialising whole values (a positional read on `DiskTier`, a refcounted
+  mapping slice on `MmapDiskTier`). Chunk-granular faulting à la shardstore
+  is the same router with chunk keys (`(artifact, chunk_no)`) — promotion,
+  rollover, and single-flight compose with it for free.
+- Deliberately not built in: async file offload (wrap file tiers at the
+  executor edge) and background refresh.
+
 ## Open questions (deliberately unresolved)
 
 1. `Send` futures are part of the trait contract (server-first). Is a
    non-`Send` "local" variant worth the surface?
-2. Read-only tiers: cold stores you never write back to. Currently every
-   routed tier must implement `TierWrite`.
+2. Read-only tiers are first-class (`read_only_tier`, requiring only
+   `TierRead`); finer-grained capability splits (delete-but-not-put,
+   promote-into-but-not-demote-into) are open.
 3. `TierList` for the router itself (cross-tier cursor unification, dedup).
 4. Write-back mode (dirty tracking + flush) — v2 at the earliest.
 5. Single-flight granularity: the cache gates whole `get`s per key, so
@@ -149,6 +182,9 @@ graduate into a real tier once we're happy with it.
     (they hold the tier's lock). The refcounted-value path is shipped
     (`tierstore-mmap` + `V = Bytes` make boundary clones free); router-level
     borrowed views (boxed guards, top-tier fast path) remain open.
+13. Observability: per-tier hit/miss/error/eviction counters on the router
+    (shardstore's `ArtifactCache` keeps these) — a stats snapshot API is the
+    obvious shape.
 
 ## Prior art
 

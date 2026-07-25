@@ -71,6 +71,9 @@ pub enum RouterError {
     /// inconsistent: stale upper copies can shadow new values or resurrect
     /// deleted keys.
     Partial(Vec<TierFailure>),
+    /// A write was routed to a hierarchy with no writable tier (every tier
+    /// was added via `read_only_tier`).
+    ReadOnly,
 }
 
 impl RouterError {
@@ -80,6 +83,7 @@ impl RouterError {
         match self {
             Self::Tier(failure) => std::slice::from_ref(failure),
             Self::Inconclusive(failures) | Self::Partial(failures) => failures,
+            Self::ReadOnly => &[],
         }
     }
 }
@@ -98,6 +102,7 @@ impl fmt::Display for RouterError {
                 "operation partially failed on {} tier(s); cross-tier state may be inconsistent",
                 failures.len()
             ),
+            Self::ReadOnly => write!(f, "write rejected: the router has no writable tier"),
         }
     }
 }
@@ -109,6 +114,7 @@ impl StdError for RouterError {
             Self::Inconclusive(failures) | Self::Partial(failures) => {
                 failures.first().map(|f| f as &(dyn StdError + 'static))
             }
+            Self::ReadOnly => None,
         }
     }
 }
