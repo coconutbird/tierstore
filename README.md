@@ -175,9 +175,10 @@ let cache = TieredCache::builder()
    promote-into-but-not-demote-into) are open.
 3. `TierList` for the router itself (cross-tier cursor unification, dedup).
 4. Write-back mode (dirty tracking + flush) — v2 at the earliest.
-5. Single-flight granularity: the cache gates whole `get`s per key, so
-   same-key *hot* hits serialize briefly too; a probe-then-gate refinement
-   and deadlock-free batched-`get` coalescing are open.
+5. Single-flight granularity: `get_or_load` ships probe-then-gate (hits
+   never touch the gate) for stacks whose origin lives in the loader; plain
+   `get` still gates whole reads because an in-stack cold tier would be
+   stampeded by ungated probes. Deadlock-free batched coalescing is open.
 6. Per-tier TTL / staleness, negative caching.
 7. Demotion churn when a lower tier is smaller than the one above it.
 8. Typed-over-bytes is shipped (`CodecTier`: one-way key mapping, value

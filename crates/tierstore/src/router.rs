@@ -421,6 +421,20 @@ where
         Ok(ReadReport { statuses, failures })
     }
 
+    /// Single-key read with tier provenance: [`Router::read_many`] for one
+    /// key, unpacked. Useful when per-tier hit metrics matter for
+    /// individual reads.
+    ///
+    /// # Errors
+    ///
+    /// Only under [`OnReadError::FailFast`], like `read_many`.
+    pub async fn read_one(&self, key: &K) -> Result<(KeyStatus<V>, Vec<TierFailure>), RouterError> {
+        let mut report = self.read_many(std::slice::from_ref(key)).await?;
+        // One key in, one status out; the fallback is unreachable.
+        let status = report.statuses.pop().unwrap_or(KeyStatus::Miss);
+        Ok((status, report.failures))
+    }
+
     /// Batched delete with per-key outcomes. Every *writable* tier is
     /// attempted for every key regardless of failures (skipping one
     /// guarantees resurrection); read-only tiers are untouched — their

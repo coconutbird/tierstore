@@ -13,6 +13,7 @@
 //! TTL/staleness and negative caching.
 
 use std::fmt;
+use std::future::Future;
 use std::hash::Hash;
 
 use tierstore_core::{
@@ -145,6 +146,54 @@ where
     /// because a surviving copy can resurrect the key.
     pub async fn invalidate(&self, key: &K) -> Result<bool, RouterError> {
         self.router.delete(key).await
+    }
+
+    /// Read-through with an external loader: `get` the hierarchy, and on a
+    /// miss run `load` (typically the origin fetch) and fill the tiers with
+    /// its result.
+    ///
+    /// Uses probe-then-gate single-flight: hits never touch the per-key
+    /// gate, and concurrent misses for one key share a single load —
+    /// followers re-probe under the gate and reuse the leader's fill.
+    /// Intended for stacks whose expensive origin lives *in the loader*
+    /// (probes only touch the cache tiers); with an expensive in-stack
+    /// bottom tier, prefer plain [`TieredCache::get`], whose gate covers
+    /// the whole probe.
+    ///
+    /// Availability-first: probe failures are treated as misses (the loader
+    /// is the authority), fills are best-effort, and loader errors are
+    /// returned without being cached. With single-flight disabled this is a
+    /// plain uncoalesced read-through.
+    ///
+    /// # Errors
+    ///
+    /// Exactly the loader's error, when the value was not cached and `load`
+    /// failed.
+    pub async fn get_or_load<E, Fut>(&self, key: &K, load: Fut) -> Result<V, E>
+    where
+        Fut: Future<Output = Result<V, E>> + Send,
+    {
+        if let Ok(Some(value)) = self.router.get(key).await {
+            return Ok(value);
+        }
+        if !self.single_flight {
+            let result = load.await;
+            if let Ok(value) = &result {
+                let _ = self.router.put(key.clone(), value.clone()).await;
+            }
+            return result;
+        }
+        let gate = self.gates.acquire(key.clone()).await;
+        if let Ok(Some(value)) = self.router.get(key).await {
+            drop(gate);
+            return Ok(value);
+        }
+        let result = load.await;
+        if let Ok(value) = &result {
+            let _ = self.router.put(key.clone(), value.clone()).await;
+        }
+        drop(gate);
+        result
     }
 
     /// Batched read-through with per-key outcomes: hits carry the tier that

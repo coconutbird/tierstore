@@ -146,6 +146,61 @@ fn batched_cache_round_trip() {
 }
 
 #[test]
+fn get_or_load_fills_once_and_never_caches_errors() {
+    let hot = Arc::new(MemoryTier::unbounded());
+    let cache: TieredCache<String, String> = TieredCache::builder().tier(Arc::clone(&hot)).build();
+
+    // Loader errors are returned and not cached.
+    let err = block_on(cache.get_or_load(&key("k"), async { Err::<String, _>("origin down") }));
+    assert_eq!(err, Err("origin down"));
+    assert_eq!(block_on(hot.get(&key("k"))).expect("hot peek"), None);
+
+    // A successful load fills the tiers…
+    let value = block_on(cache.get_or_load(&key("k"), async { Ok::<_, String>(key("v")) }));
+    assert_eq!(value, Ok(key("v")));
+    assert_eq!(
+        block_on(hot.get(&key("k"))).expect("hot peek"),
+        Some(key("v"))
+    );
+
+    // …and subsequent calls are served without consulting the loader.
+    let served = block_on(cache.get_or_load(&key("k"), async {
+        Err::<String, _>("loader must not run".to_owned())
+    }));
+    assert_eq!(served, Ok(key("v")));
+}
+
+#[test]
+fn get_or_load_coalesces_concurrent_loads() {
+    let hot = Arc::new(MemoryTier::unbounded());
+    let cache: Arc<TieredCache<String, String>> =
+        Arc::new(TieredCache::builder().tier(Arc::clone(&hot)).build());
+    let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let cache = Arc::clone(&cache);
+            let loads = Arc::clone(&loads);
+            std::thread::spawn(move || {
+                block_on(cache.get_or_load(&key("k"), async {
+                    loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(30));
+                    Ok::<_, String>(key("v"))
+                }))
+            })
+        })
+        .collect();
+    for handle in handles {
+        assert_eq!(handle.join().expect("loader thread"), Ok(key("v")));
+    }
+    assert_eq!(
+        loads.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "concurrent misses must share one load"
+    );
+}
+
+#[test]
 fn single_flight_coalesces_concurrent_misses() {
     let hot = Arc::new(MemoryTier::unbounded());
     // Cold origin: counted, and slow enough that all threads overlap on the
