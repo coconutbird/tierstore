@@ -145,6 +145,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "groupnet"
+version = "0.1.0"
+source = "git+https://github.com/napbat/groupnet?branch=main#adf88aa1cc8c5e69b898a17356345b4be9953b4f"
+dependencies = [
+ "groupnet-core",
+ "groupnet-runtime",
+ "groupnet-transport",
+ "groupnet-transport-mem",
+]
+
+[[package]]
+name = "groupnet-core"
+version = "0.1.0"
+source = "git+https://github.com/napbat/groupnet?branch=main#adf88aa1cc8c5e69b898a17356345b4be9953b4f"
+
+[[package]]
+name = "groupnet-runtime"
+version = "0.1.0"
+source = "git+https://github.com/napbat/groupnet?branch=main#adf88aa1cc8c5e69b898a17356345b4be9953b4f"
+dependencies = [
+ "groupnet-core",
+ "groupnet-transport",
+ "tokio",
+]
+
+[[package]]
+name = "groupnet-transport"
+version = "0.1.0"
+source = "git+https://github.com/napbat/groupnet?branch=main#adf88aa1cc8c5e69b898a17356345b4be9953b4f"
+dependencies = [
+ "groupnet-core",
+]
+
+[[package]]
+name = "groupnet-transport-mem"
+version = "0.1.0"
+source = "git+https://github.com/napbat/groupnet?branch=main#adf88aa1cc8c5e69b898a17356345b4be9953b4f"
+dependencies = [
+ "groupnet-core",
+ "groupnet-transport",
+ "tokio",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -340,6 +384,15 @@ name = "tierstore-core"
 version = "0.1.0"
 
 [[package]]
+name = "tierstore-groupnet"
+version = "0.1.0"
+dependencies = [
+ "groupnet",
+ "tierstore",
+ "tokio",
+]
+
+[[package]]
 name = "tierstore-mmap"
 version = "0.1.0"
 dependencies = [
@@ -354,6 +407,27 @@ version = "0.1.0"
 dependencies = [
  "moka",
  "tierstore-core",
+]
+
+[[package]]
+name = "tokio"
+version = "1.53.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+dependencies = [
+ "pin-project-lite",
+ "tokio-macros",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6328af13490e73a9b4694030fafd93f8c8c6a9dede33e821c3fc63eddf8042ba"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

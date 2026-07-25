@@ -5,6 +5,7 @@ members = [
     "crates/tierstore",
     "crates/tierstore-mmap",
     "crates/tierstore-moka",
+    "crates/tierstore-groupnet",
     "crates/rollover-demo",
 ]
 
@@ -22,6 +23,8 @@ tierstore = { path = "crates/tierstore", version = "0.1.0" }
 bytes = "1"
 memmap2 = "0.9"
 moka = { version = "0.12", features = ["future"] }
+groupnet = { git = "https://github.com/napbat/groupnet", branch = "main" }
+tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

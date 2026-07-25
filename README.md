@@ -26,6 +26,11 @@ tierstore-moka   Adapter: MokaTier, a sharded TinyLFU hot tier for
                  high-throughput inclusive hierarchies (moka evicts
                  internally, so it reports no displacement — use MemoryTier
                  for exclusive rollover stacks).
+tierstore-groupnet  Adapter: cross-node write sync over the groupnet gossip
+                 fabric — WriteFeed publishes local writes, PeerWrites turns
+                 peer feeds into Invalidate/Resync events. State-based and
+                 loss-tolerant; missed writes degrade to an explicit Resync,
+                 never a silent skip.
                  Together these are the template for backend adapters
                  (redis, s3, postgres, …).
 ```

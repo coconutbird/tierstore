@@ -1,0 +1,21 @@
+[package]
+name = "tierstore-groupnet"
+description = "Cross-node write sync for tierstore caches over the groupnet gossip fabric: publish local writes, receive peer invalidations"
+keywords = ["tiered", "cache", "invalidation", "gossip", "coherence"]
+categories = ["caching", "asynchronous", "network-programming"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+groupnet.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tierstore.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
+[lints]
+workspace = true
